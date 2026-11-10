@@ -213,7 +213,21 @@ enum Cmd {
     },
 }
 
+/// A panic is said in the kernel log before it takes the recovery down: the
+/// phone shows the pages again a moment later, and this is the only place
+/// that says why it did not.
+#[cfg(target_os = "android")]
+fn report_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = skyward_sys::kmsg(&format!("skyward panicked: {info}"));
+        previous(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    #[cfg(target_os = "android")]
+    report_panics();
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
