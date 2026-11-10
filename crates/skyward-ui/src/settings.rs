@@ -39,6 +39,10 @@ pub struct Settings {
     pub dark: bool,
     /// The pages go dark by themselves at night, from 19:00 to 7:00.
     pub auto_dark: bool,
+    /// The panel shows the time while the pages sleep; none while the phone's
+    /// own configuration has yet to be overridden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aod: Option<bool>,
     /// The brightness slider's place, from 0 at its left end to 1.
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, in seconds; 0
@@ -123,6 +127,7 @@ impl Settings {
             spoken: Some(state.lang.tag().to_string()),
             dark: state.dark,
             auto_dark: state.auto_dark,
+            aod: Some(state.aod),
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
@@ -174,6 +179,9 @@ impl Settings {
         }
         state.dark = self.dark;
         state.auto_dark = self.auto_dark;
+        if let Some(on) = self.aod {
+            state.aod = on;
+        }
         if (0.0..=1.0).contains(&self.brightness) {
             state.brightness = self.brightness;
         }

@@ -561,6 +561,8 @@ pub enum Switch {
     ShowPassword,
     /// Go dark by the clock: dark from 19:00 to 7:00, light the rest.
     AutoDark,
+    /// Show the time and the battery while the pages sleep.
+    Aod,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -2264,7 +2266,7 @@ const FOLD_PERIOD: f32 = 0.354;
 /// The backlight the always-on screen is lit with, as a share of the
 /// brightness at the slider's top: dim enough to read in the dark and to
 /// leave the room dark around it.
-const AOD_LEVEL: f32 = 0.06;
+const AOD_LEVEL: f32 = 0.20;
 /// How often the always-on screen draws itself again: it shows the time to
 /// the minute, and a frame more often than that keeps it right.
 const AOD_TICK_MS: u64 = 20_000;
@@ -5498,6 +5500,7 @@ impl App {
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::AutoDark => &mut self.state.auto_dark,
+                    Switch::Aod => &mut self.state.aod,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
@@ -8502,6 +8505,18 @@ mod tests {
         // One tap wakes the pages.
         app.touch(Touch::Down(600.0, 1600.0), &f, 100);
         assert!(app.display_on(), "a tap on the always-on screen wakes it");
+    }
+
+    #[test]
+    fn the_always_on_screen_has_a_switch_on_the_settings_page() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i);
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::Aod)), "the switch is on the settings page");
+        tap_at(&mut app, &f, &i, Action::Toggle(Switch::Aod), 1000);
+        assert!(app.state.aod, "the switch turns it on");
+        tap_at(&mut app, &f, &i, Action::Toggle(Switch::Aod), 2000);
+        assert!(!app.state.aod, "and off again");
     }
 
     #[test]
