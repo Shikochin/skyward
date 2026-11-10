@@ -8358,6 +8358,27 @@ mod tests {
     }
 
     #[test]
+    fn fast_taps_on_a_key_type_every_character() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Search, W, H, PPD);
+        let key = app
+            .frame(&f, &i)
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Type(Cap::Char('u')))
+            .expect("the keyboard has a u")
+            .rect;
+        let (x, y) = (key.x + key.w / 2.0, key.y + key.h / 2.0);
+        let mut now = 0;
+        for _ in 0..10 {
+            app.touch(Touch::Down(x, y), &f, now);
+            app.touch(Touch::Up, &f, now + 20);
+            now += 60;
+        }
+        assert_eq!(app.state.search, "uuuuuuuuuu", "every tap types");
+    }
+
+    #[test]
     fn the_pages_go_dark_by_the_clock_when_asked() {
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.state.auto_dark = true;

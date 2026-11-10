@@ -55,7 +55,7 @@ fn gone(e: &io::Error) -> bool {
 /// Slot 0's value of a multitouch axis. The kernel keeps multitouch values
 /// per slot, apart from the axis state the ABS queries return, and hands
 /// them out through EVIOCGMTSLOTS: the axis code, then one value per slot.
-fn slot0_value(dev: &RawDevice, axis: AbsoluteAxisCode, slots: usize) -> io::Result<i32> {
+fn slot_value(dev: &RawDevice, axis: AbsoluteAxisCode, slot: usize, slots: usize) -> io::Result<i32> {
     let mut buf = vec![0i32; 1 + slots];
     buf[0] = i32::from(axis.0);
     // _IOC(_IOC_READ, 'E', 0x0a, size)
@@ -63,18 +63,23 @@ fn slot0_value(dev: &RawDevice, axis: AbsoluteAxisCode, slots: usize) -> io::Res
     if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, buf.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(buf[1])
+    Ok(buf[1 + slot.min(slots - 1)])
 }
 
-/// The direct-touch panel. Only the first finger is followed (multitouch
-/// protocol B, slot 0).
+/// The direct-touch panel, in multitouch protocol B: the finger followed is
+/// the first one down, whichever slot the panel puts it in. The panel of
+/// this phone puts one tap in one slot and the next in another, so the slot
+/// is followed rather than taken for the first.
 struct Panel {
     dev: RawDevice,
     path: PathBuf,
     x_range: (i32, i32),
     y_range: (i32, i32),
     slots: usize,
-    slot: i32,
+    /// The slot the panel's last report spoke of.
+    slot: usize,
+    /// The slot the finger followed is in.
+    followed: usize,
     down: bool,
     was_down: bool,
     raw: (i32, i32),
@@ -109,7 +114,7 @@ impl Panel {
         }
         set_nonblocking(dev.as_raw_fd()).context("make touch non-blocking")?;
         let mut panel =
-            Panel { dev, path, x_range, y_range, slots, slot: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false };
+            Panel { dev, path, x_range, y_range, slots, slot: 0, followed: 0, down: false, was_down: false, raw: (0, 0), moved: false, dropped: false };
         // The kernel drops a position equal to the one a slot already holds,
         // so a touch landing where the last one lifted carries no position;
         // start from what the panel holds now.
@@ -120,11 +125,20 @@ impl Panel {
 
     /// Read the current slot and slot 0's finger back from the panel.
     fn resync(&mut self) -> io::Result<()> {
-        self.slot = self.dev.get_abs_state()?[usize::from(AbsoluteAxisCode::ABS_MT_SLOT.0)].value;
-        self.down = slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_TRACKING_ID, self.slots)? >= 0;
+        self.slot = self.dev.get_abs_state()?[usize::from(AbsoluteAxisCode::ABS_MT_SLOT.0)].value.max(0) as usize;
+        // The first slot holding a finger is the one followed.
+        self.followed = self.slot.min(self.slots - 1);
+        self.down = false;
+        for slot in 0..self.slots {
+            if slot_value(&self.dev, AbsoluteAxisCode::ABS_MT_TRACKING_ID, slot, self.slots)? >= 0 {
+                self.followed = slot;
+                self.down = true;
+                break;
+            }
+        }
         self.raw = (
-            slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_X, self.slots)?,
-            slot0_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_Y, self.slots)?,
+            slot_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_X, self.followed, self.slots)?,
+            slot_value(&self.dev, AbsoluteAxisCode::ABS_MT_POSITION_Y, self.followed, self.slots)?,
         );
         self.moved = true;
         Ok(())
@@ -159,13 +173,29 @@ impl Panel {
                     self.moved = false;
                 }
                 _ if self.dropped => {}
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v,
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) if self.slot == 0 => self.down = v >= 0,
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v) if self.slot == 0 => {
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, v) => self.slot = v.max(0) as usize,
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, v) => {
+                    let down = v >= 0;
+                    if down && !self.down {
+                        // A finger landed in the slot the report speaks of:
+                        // it is the one followed until it lifts.
+                        self.followed = self.slot;
+                        self.down = true;
+                    } else if down && self.down && self.slot != self.followed {
+                        // Another finger, unless the one followed lifted
+                        // without its report seen: then this one is followed.
+                        if slot_value(&self.dev, AbsoluteAxisCode::ABS_MT_TRACKING_ID, self.followed, self.slots)? < 0 {
+                            self.followed = self.slot;
+                        }
+                    } else if !down && self.down && self.slot == self.followed {
+                        self.down = false;
+                    }
+                }
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, v) if self.slot == self.followed => {
                     self.raw.0 = v;
                     self.moved = true;
                 }
-                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v) if self.slot == 0 => {
+                EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, v) if self.slot == self.followed => {
                     self.raw.1 = v;
                     self.moved = true;
                 }
