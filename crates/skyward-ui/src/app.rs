@@ -1585,6 +1585,9 @@ pub struct State {
     pub dark: bool,
     /// The pages go dark by themselves at night, from 19:00 to 7:00.
     pub auto_dark: bool,
+    /// The panel shows the time while the pages sleep, as the phone's own
+    /// system does: the always-on screen.
+    pub aod: bool,
     /// The hour the local clock last read, as `set_local_time` was told it.
     pub local_hour: Option<u8>,
     pub brightness: f32,
@@ -1765,6 +1768,7 @@ impl Default for State {
             language_chosen: false,
             dark: false,
             auto_dark: false,
+            aod: false,
             local_hour: None,
             brightness: SLIDER_START,
             // Two minutes.
@@ -2257,6 +2261,18 @@ const TITLE_BLUR_DP: f32 = 25.0 / 3.0;
 const FOLD_FADE_DP: f32 = 26.0;
 const FOLD_SETTLE: f32 = 0.5;
 const FOLD_PERIOD: f32 = 0.354;
+/// The backlight the always-on screen is lit with, as a share of the
+/// brightness at the slider's top: dim enough to read in the dark and to
+/// leave the room dark around it.
+const AOD_LEVEL: f32 = 0.06;
+/// How often the always-on screen draws itself again: it shows the time to
+/// the minute, and a frame more often than that keeps it right.
+const AOD_TICK_MS: u64 = 20_000;
+/// How quickly two taps on a dark panel have to come, and how near each
+/// other, to wake it.
+const DOUBLE_TAP_MS: u64 = 400;
+const DOUBLE_TAP_SLOP: f32 = 120.0;
+
 /// How far, in dp, a swipe from an edge has to come in to go back.
 const BACK_SWIPE_DP: f32 = 56.0;
 /// How many pages under the one shown are kept drawn, for a swipe to show:
@@ -2769,6 +2785,9 @@ pub struct App {
     /// The canvas a swipe drew the page on, kept to draw the next one on
     /// rather than take a screen's worth of memory each time.
     preview_front: Option<Canvas>,
+    /// The last tap on the dark panel, where and when, for the second of a
+    /// double tap to be told from the first.
+    last_tap: Option<(u64, f32, f32)>,
     /// A swipe in from an edge that has yet to show its preview, with how
     /// far the finger has come: the frame that draws the page draws the
     /// preview too, since drawing a page's rows takes the fonts and the
@@ -2844,6 +2863,7 @@ impl App {
             lefts: Vec::new(),
             preview: None,
             preview_front: None,
+            last_tap: None,
             preview_wanted: None,
             corners: 0.0,
             dirty: true,
@@ -2851,6 +2871,13 @@ impl App {
             h,
             px_per_dp,
         }
+    }
+
+    /// Whether the panel shows the time while the pages sleep, as the
+    /// phone's own system does.
+    pub fn set_aod(&mut self, on: bool) {
+        self.state.aod = on;
+        self.dirty = true;
     }
 
     /// The screen's corners are rounded to `radius` pixels: so are the
@@ -2889,6 +2916,11 @@ impl App {
     /// backlight eases, else when a shown message should disappear or the
     /// panel should dim or go off.
     pub fn deadline(&self, now: u64) -> Option<u64> {
+        // The always-on screen draws itself again to keep the time it shows
+        // to the minute.
+        if !self.display_on && self.state.aod {
+            return Some(now + AOD_TICK_MS);
+        }
         let sliding = matches!(self.button, Some((_, Press::Slide { .. }))) && self.state.confirm < 1.0;
         let moving = self.display_on
             && (self.fling.is_some()
@@ -3171,6 +3203,11 @@ impl App {
     /// is told to go off.
     pub fn panel(&self, now: u64) -> Option<f32> {
         if !self.display_on {
+            // The always-on screen keeps the panel lit, dim, while the pages
+            // sleep.
+            if self.state.aod {
+                return Some(AOD_LEVEL);
+            }
             return self.darkening.filter(|_| self.curtain.level(now) > 0.0);
         }
         let (full, level) = (self.state.brightness, self.bright.level(now));
@@ -3252,7 +3289,9 @@ impl App {
     /// now, then the panel goes off. A finger on the glass lets go of what
     /// it held, and the page stops where it is.
     fn sleep(&mut self, now: u64) {
-        self.darkening = self.panel(now);
+        // With an always-on screen the panel does not go dark: it shows the
+        // time at the dim light it is lit with.
+        self.darkening = if self.state.aod { None } else { self.panel(now) };
         self.curtain.set(false, now);
         self.display_on = false;
         self.bright = full_brightness();
@@ -4287,6 +4326,11 @@ impl App {
     /// while a cable has just gone in, both as dark as the content stands
     /// as the panel goes off or comes up.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        // The always-on screen takes the panel while the pages sleep.
+        if !self.display_on && self.state.aod {
+            self.compose_aod(out, f, info, clock);
+            return;
+        }
         let charge = self.charging.as_ref().map_or(0.0, |c| c.shown.level(now));
         if charge < 1.0 {
             self.compose_page(out, f, info, clock, now);
@@ -4295,6 +4339,31 @@ impl App {
             self.compose_charging(out, f, info, charge, now);
         }
         out.dim(self.curtain.level(now));
+    }
+
+    /// The always-on screen: the time, the battery, and what a finger does
+    /// to it, on black while the pages sleep and the panel is lit low.
+    fn compose_aod(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str) {
+        let t = self.theme();
+        let (w, h) = (out.w as f32, out.h as f32);
+        out.clear(Rgba::rgb(0, 0, 0));
+        let ink = Rgba::rgb(0xd6, 0xd8, 0xde);
+        let dim = Rgba::rgb(0x78, 0x7c, 0x86);
+        // The time, large, above the middle.
+        let px = t.m.dp(78.0);
+        let width = Canvas::new(0, 0).text_width(&f.display, clock, px);
+        out.text(&f.display, clock, (w - width) / 2.0, h * 0.34, px, ink, None);
+        // The battery under it.
+        let level = info.battery.as_ref().map_or(0, |b| b.level);
+        let said = format!("{level}%");
+        let px = t.m.dp(18.0);
+        let width = Canvas::new(0, 0).text_width(&f.body, &said, px);
+        out.text(&f.body, &said, (w - width) / 2.0, h * 0.34 + t.m.dp(86.0), px, dim, None);
+        // What a finger does to it.
+        let hint = self.state.lang.pick(["轻触亮屏", "輕觸亮屏", "Tap to wake"]);
+        let px = t.m.dp(15.0);
+        let width = Canvas::new(0, 0).text_width(&f.body, hint, px);
+        out.text(&f.body, hint, (w - width) / 2.0, h * 0.84, px, dim, None);
     }
 
     /// The charging screen, `level` of the way over the page drawn on `out`.
@@ -4942,6 +5011,9 @@ impl App {
         }
         self.state.local_hour = hour;
         self.by_the_clock();
+        if !self.display_on && self.state.aod {
+            self.dirty = true;
+        }
     }
 
     /// The pages go dark or light as the clock says, where they go by it.
@@ -6216,11 +6288,24 @@ impl App {
     }
 
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
-        // A finger on the dark panel lights nothing, as on the phone's own
-        // system, where the power key lights it.
+        // A finger on the dark panel lights it: twice quickly where the
+        // panel is dark, once where the always-on screen shows. Either way
+        // the finger that woke it presses nothing.
         if !self.display_on {
+            if let Touch::Down(x, y) = ev {
+                let near = self.last_tap.is_some_and(|(at, tx, ty)| {
+                    now.saturating_sub(at) <= DOUBLE_TAP_MS && (x - tx).abs() <= DOUBLE_TAP_SLOP && (y - ty).abs() <= DOUBLE_TAP_SLOP
+                });
+                self.last_tap = Some((now, x, y));
+                if self.state.aod || near {
+                    self.wake(now);
+                    self.last_tap = None;
+                    self.drag = Drag::Waking;
+                }
+            }
             return Vec::new();
         }
+        self.last_tap = None;
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
         if self.charge_shown() {
@@ -8376,6 +8461,47 @@ mod tests {
             now += 60;
         }
         assert_eq!(app.state.search, "uuuuuuuuuu", "every tap types");
+    }
+
+    #[test]
+    fn a_double_tap_on_the_dark_panel_lights_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.sleep(0);
+        assert!(!app.display_on(), "the pages sleep");
+        // One tap lights nothing.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 1000);
+        app.touch(Touch::Up, &f, 1010);
+        assert!(!app.display_on(), "one tap is not two");
+        // Two quickly do.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 1200);
+        assert!(app.display_on(), "the second tap lights the panel");
+        app.touch(Touch::Up, &f, 1210);
+        // Two far apart in time do not.
+        app.sleep(2000);
+        app.touch(Touch::Down(600.0, 1600.0), &f, 3000);
+        app.touch(Touch::Up, &f, 3010);
+        app.touch(Touch::Down(600.0, 1600.0), &f, 4000);
+        assert!(!app.display_on(), "the taps were a second apart");
+    }
+
+    #[test]
+    fn the_always_on_screen_shows_while_the_pages_sleep() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.set_aod(true);
+        app.sleep(0);
+        assert!(!app.display_on(), "the pages sleep");
+        assert!(app.panel(10).is_some(), "the panel stays lit, dim");
+        assert_eq!(app.deadline(10), Some(10 + AOD_TICK_MS), "it draws itself again to keep the time right");
+        // What it shows is the time and the battery, on black.
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "23:41", 20);
+        let lit = c.data.chunks_exact(4).filter(|px| px[0] > 0x40).count();
+        assert!(lit > 200, "the time is drawn: {lit} lit pixels");
+        // One tap wakes the pages.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 100);
+        assert!(app.display_on(), "a tap on the always-on screen wakes it");
     }
 
     #[test]

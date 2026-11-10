@@ -291,6 +291,11 @@ pub struct Device {
     /// only adb, sideload and fastboot leaves the port unset up for it.
     #[serde(default = "default_true")]
     pub mtp: bool,
+    /// The panel shows the time, the battery and what a finger does to it
+    /// while the pages sleep, as the phone's own system does: the always-on
+    /// screen, lit dim, woken by a tap.
+    #[serde(default)]
+    pub aod: bool,
     /// Programs of the phone's own recovery that are frozen before this
     /// recovery brings anything up, by the name their init scripts give
     /// them: parts that expect a recovery program of the phone maker's, and
