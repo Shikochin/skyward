@@ -67,6 +67,12 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// A folder whose files and links go into the ramdisk at the paths
+        /// they have in it: the phone's own programs a recovery runs, and
+        /// the libraries they need, taken from the build the recovery's
+        /// ramdisk is of rather than from the installed system.
+        #[arg(long)]
+        overlay: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -105,7 +111,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, overlay, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -148,6 +154,9 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
+            if let Some(dir) = &overlay {
+                add_overlay(&mut rd, dir)?;
+            }
             img.ramdisk = rd.encode()?;
             let bytes = img.to_bytes()?;
             write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
@@ -161,6 +170,38 @@ fn main() -> Result<()> {
             }
         }
     }
+}
+
+/// Add every file and link under `dir` to `rd` at the path it has in
+/// `dir`, keeping its permissions: the phone's own programs a recovery
+/// runs, and the libraries they need.
+fn add_overlay(rd: &mut Ramdisk, dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(rd: &mut Ramdisk, at: &Path, root: &Path) -> Result<()> {
+        let mut entries = std::fs::read_dir(at).with_context(|| format!("read {}", at.display()))?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).with_context(|| format!("read {}", path.display()))?;
+            let name = path.strip_prefix(root).expect("every path is under the folder").to_string_lossy().replace('\\', "/");
+            if meta.is_dir() {
+                let mode = (meta.permissions().mode() & 0o7777) as u32;
+                rd.mkdir(&name, mode)?;
+                walk(rd, &path, root)?;
+                continue;
+            }
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&path).with_context(|| format!("read {}", path.display()))?;
+                rd.link(&name, &target.to_string_lossy())?;
+            } else {
+                let mode = (meta.permissions().mode() & 0o7777) as u32;
+                let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+                rd.add(&name, mode, data)?;
+            }
+        }
+        Ok(())
+    }
+    walk(rd, dir, dir)
 }
 
 /// The partition a recovery is made on, as a full update package names it.

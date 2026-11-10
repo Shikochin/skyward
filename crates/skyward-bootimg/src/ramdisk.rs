@@ -151,6 +151,15 @@ impl Ramdisk {
         self.insert(name, S_IFREG | mode, data)
     }
 
+    /// Add a root-owned folder, creating the missing parents; a folder
+    /// already there is left as it is.
+    pub fn mkdir(&mut self, name: &str, mode: u32) -> Result<()> {
+        if self.find(name).is_some() {
+            return Ok(());
+        }
+        self.insert(name, S_IFDIR | mode, Vec::new())
+    }
+
     /// Point `name` to `target`: a link already there is pointed anew, and
     /// otherwise a root-owned link is added, creating missing parent
     /// directories.
