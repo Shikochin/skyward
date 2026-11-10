@@ -271,6 +271,29 @@ pub struct Device {
     /// System property that carries the vendor OS version.
     #[serde(default = "default_os_version_prop")]
     pub os_version_prop: String,
+    /// Run the recovery permissive, as the phone's own recovery image may
+    /// have been built to: a policy made for one phone model need not allow
+    /// the programs of another build that a recovery here runs, and there is
+    /// no framework of the installed system's to ask at boot.
+    #[serde(default)]
+    pub permissive: bool,
+    /// Show the boot report the recovery service wrote before the pages
+    /// start, as the first page, where no computer or finger can reach the
+    /// phone to read its log.
+    #[serde(default)]
+    pub diagnose: bool,
+    /// Whether the phone's own recovery sets up file transfer over the port,
+    /// as `sys.usb.config` asks for `mtp,adb`. A recovery whose init knows
+    /// only adb, sideload and fastboot leaves the port unset up for it.
+    #[serde(default = "default_true")]
+    pub mtp: bool,
+    /// Programs of the phone's own recovery that are frozen before this
+    /// recovery brings anything up, by the name their init scripts give
+    /// them: parts that expect a recovery program of the phone maker's, and
+    /// that may restart the phone when this one does not answer. Frozen
+    /// rather than stopped, so init does not take their ending for a crash.
+    #[serde(default)]
+    pub freeze: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -390,6 +413,48 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The sockets init makes for the program before it starts it, each
+    /// reachable at `/dev/socket/<name>` and handed to it in
+    /// `ANDROID_SOCKET_<name>`, as init's socket lines do. A program that
+    /// is started without one fails to find it.
+    #[serde(default)]
+    pub sockets: Vec<Socket>,
+    /// What it finds in its environment, as init's setenv lines give it.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+/// A socket init makes for a program it starts, at `/dev/socket/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Socket {
+    /// Its name, which is the node's name in the socket folder.
+    pub name: String,
+    /// How it carries what is written to it, as init's socket line names it.
+    #[serde(default)]
+    pub kind: SocketKind,
+    /// Its permissions, written as an octal number.
+    #[serde(default = "default_socket_mode")]
+    pub mode: u32,
+    /// The account that owns it, root where none is given.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// The group it is in, root's where none is given.
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// How a socket init makes carries what is written to it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SocketKind {
+    Stream,
+    #[default]
+    Dgram,
+    Seqpacket,
+}
+
+fn default_socket_mode() -> u32 {
+    0o660
 }
 
 /// The kernel's capabilities, by the names init's capabilities lines give
@@ -521,6 +586,9 @@ impl DeviceConfig {
         for name in &cfg.partitions.mounted {
             ensure!(!name.is_empty() && !name.contains('/'), "[partitions] mounted: {name} is not a partition's name");
         }
+        for name in &cfg.device.freeze {
+            ensure!(!name.is_empty() && !name.contains(char::is_whitespace), "[device] freeze: {name:?} is not a service's name");
+        }
         for s in cfg.services.iter().filter(|s| s.oneshot) {
             let waits = s.ready_property.is_some() || s.ready_service.is_some() || s.ready_hardware_service.is_some();
             ensure!(
@@ -536,6 +604,17 @@ impl DeviceConfig {
             }
             for name in &s.capabilities {
                 ensure!(capability(name).is_some(), "[[service]] {}: {name} is not a capability init knows", s.path);
+            }
+            for sock in &s.sockets {
+                let plain = !sock.name.is_empty() && !sock.name.contains('/') && !sock.name.contains(char::is_whitespace);
+                ensure!(plain, "[[service]] {}: {:?} is not a socket's name", s.path, sock.name);
+                ensure!(sock.mode <= 0o7777, "[[service]] {}: socket {} has mode {:o}, which is not one", s.path, sock.name, sock.mode);
+                for name in sock.user.iter().chain(&sock.group) {
+                    ensure!(!name.is_empty() && !name.contains(char::is_whitespace), "[[service]] {}: socket {}: {name:?} is not an account's name", s.path, sock.name);
+                }
+            }
+            for name in s.env.keys() {
+                ensure!(!name.is_empty() && !name.contains('=') && !name.contains(char::from(0)), "[[service]] {}: {name:?} is not an environment name", s.path);
             }
         }
         for folder in &cfg.backup.data_skipped {

@@ -195,6 +195,34 @@ pub fn kmsg(line: &str) -> Result<()> {
     Ok(())
 }
 
+/// Stop a process where it stands without ending it: a service of init's
+/// that expects something a recovery here cannot give stays running, as far
+/// as init is concerned, and cannot take the phone with it.
+#[cfg(target_os = "android")]
+pub fn freeze(pid: u32) -> Result<()> {
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).with_context(|| format!("freeze pid {pid}"))
+    }
+}
+
+/// The kernel's log as it stands: what the phone's own programs and
+/// drivers have said so far, which a recovery that no computer can reach
+/// has no other way to show.
+#[cfg(target_os = "android")]
+pub fn klog() -> Result<String> {
+    // SYSLOG_ACTION_READ_ALL: the whole of the ring buffer, oldest first.
+    const READ_ALL: libc::c_int = 3;
+    let mut buf = vec![0u8; 1 << 21];
+    let n = unsafe { libc::syscall(libc::SYS_syslog, READ_ALL, buf.as_mut_ptr(), buf.len()) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error()).context("read the kernel log");
+    }
+    buf.truncate(n as usize);
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// How long the phone has been running, on the clock the kernel stamps its
 /// log with.
 fn since_boot() -> Result<Duration> {

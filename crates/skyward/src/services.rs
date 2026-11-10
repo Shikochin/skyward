@@ -4,9 +4,12 @@ use skyward_config::Service;
 use skyward_sys::ueventd;
 use skyward_vab::Mounted;
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,25 +43,52 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 /// need, searched after whatever it names itself.
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
+    // One program that cannot be started, or that never says it is ready,
+    // is no reason for the ones after it not to run: each reason goes to the
+    // kernel log and the next program is started.
     for s in services {
         if !Path::new(&s.path).is_file() {
-            bail!("{} is missing; is its partition mounted?", s.path);
+            let _ = skyward_sys::kmsg(&format!("{} is missing; is its partition mounted?", s.path));
+            continue;
         }
         let mut s = s.clone();
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }
-        let who = Credentials::of(&s, &known)?;
+        let who = match Credentials::of(&s, &known) {
+            Ok(who) => who,
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("{e:#}"));
+                continue;
+            }
+        };
+        let sockets = match make_sockets(&s, &known) {
+            Ok(sockets) => sockets,
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("{e:#}"));
+                Vec::new()
+            }
+        };
         if s.oneshot {
-            let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
-            ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
-            skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
+            match command(&s, &who, &sockets).status() {
+                Ok(status) if status.success() => {
+                    let _ = skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")));
+                }
+                Ok(status) => {
+                    let _ = skyward_sys::kmsg(&format!("{} {} ended: {status}", s.path, s.args.join(" ")));
+                }
+                Err(e) => {
+                    let _ = skyward_sys::kmsg(&format!("{} did not run: {e}", s.path));
+                }
+            }
             continue;
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
-        thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
-        ready(&waiting)?;
+        thread::Builder::new().name(name).spawn(move || supervise(&s, &who, sockets)).context("start a supervising thread")?;
+        if let Err(e) = ready(&waiting) {
+            let _ = skyward_sys::kmsg(&format!("{e:#}"));
+        }
     }
     Ok(())
 }
@@ -189,12 +219,12 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service, who: &Credentials) -> ! {
+fn supervise(s: &Service, who: &Credentials, sockets: Vec<(String, OwnedFd)>) -> ! {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
-            None => run(s, who),
+            None => run(s, who, &sockets),
         };
         let line = match ended {
             Ok(how) => format!("{}: {how}", s.path),
@@ -208,8 +238,8 @@ fn supervise(s: &Service, who: &Credentials) -> ! {
 }
 
 /// Start the program and wait for it to end.
-fn run(s: &Service, who: &Credentials) -> Result<String> {
-    let mut child = command(s, who).spawn().with_context(|| format!("start {}", s.path))?;
+fn run(s: &Service, who: &Credentials, sockets: &[(String, OwnedFd)]) -> Result<String> {
+    let mut child = command(s, who, sockets).spawn().with_context(|| format!("start {}", s.path))?;
     let status = child.wait().context("wait for it")?;
     Ok(format!("pid {} ended: {status}", child.id()))
 }
@@ -217,17 +247,90 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
 /// The program as it is started: with what it is given, from the top of the
 /// tree, reading and writing nothing of the recovery's, finding its
 /// libraries where it names them, and as `who`.
-fn command(s: &Service, who: &Credentials) -> Command {
+fn command(s: &Service, who: &Credentials, sockets: &[(String, OwnedFd)]) -> Command {
     let mut cmd = Command::new(&s.path);
-    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // What the program says goes into a log of its own under the recovery's
+    // run folder instead of nowhere: a phone with neither a computer nor a
+    // finger to reach it has this alone to say why a program did not come up.
+    let (out, err) = output(s);
+    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(out).stderr(err);
+    for (name, value) in &s.env {
+        cmd.env(name, value);
+    }
     if !s.libraries.is_empty() {
         cmd.env("LD_LIBRARY_PATH", s.libraries.join(":"));
+    }
+    // init hands each socket over as an inherited file descriptor named in
+    // the environment, which is how the phone's own programs find them.
+    for (name, fd) in sockets {
+        cmd.env(format!("ANDROID_SOCKET_{name}"), fd.as_raw_fd().to_string());
     }
     let who = who.clone();
     // Only system calls run between the fork and the exec, on what was
     // worked out before it.
     unsafe { cmd.pre_exec(move || who.take_on()) };
     cmd
+}
+
+/// Where a program's own output goes: a file named for it under the
+/// recovery's run folder, made anew each time it is started.
+fn output(s: &Service) -> (Stdio, Stdio) {
+    let name = Path::new(&s.path).file_name().map_or_else(|| "service".to_string(), |n| n.to_string_lossy().into_owned());
+    let path = format!("{}/{name}.log", skyward_sys::RUN);
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(file) => match file.try_clone() {
+            Ok(err) => (Stdio::from(file), Stdio::from(err)),
+            Err(_) => (Stdio::null(), Stdio::null()),
+        },
+        Err(_) => (Stdio::null(), Stdio::null()),
+    }
+}
+
+/// Make the sockets init would make for a program before it runs it: one
+/// node under `/dev/socket`, owned and given the permissions the
+/// configuration names, kept open for as long as the program is started
+/// again and again, and handed over by number in `ANDROID_SOCKET_<name>`.
+fn make_sockets(s: &Service, known: &HashMap<String, u32>) -> Result<Vec<(String, OwnedFd)>> {
+    let mut made = Vec::new();
+    for spec in &s.sockets {
+        let dir = Path::new("/dev/socket");
+        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+        let path = dir.join(&spec.name);
+        // A node left by a recovery that ran before this one is replaced.
+        let _ = fs::remove_file(&path);
+        let kind = match spec.kind {
+            skyward_config::SocketKind::Stream => libc::SOCK_STREAM,
+            skyward_config::SocketKind::Dgram => libc::SOCK_DGRAM,
+            skyward_config::SocketKind::Seqpacket => libc::SOCK_SEQPACKET,
+        };
+        let fd = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("make the {} socket", spec.name));
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        ensure!(bytes.len() < addr.sun_path.len(), "{} is too long for a socket's path", path.display());
+        for (i, b) in bytes.iter().enumerate() {
+            addr.sun_path[i] = *b as libc::c_char;
+        }
+        let at = (&addr as *const libc::sockaddr_un).cast::<libc::sockaddr>();
+        if unsafe { libc::bind(fd.as_raw_fd(), at, std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t) } != 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("bind the {} socket", spec.name));
+        }
+        let id = |name: &String| ueventd::account(known, name).with_context(|| format!("socket {}: the phone has no account named {name}", spec.name));
+        let uid = spec.user.as_ref().map(id).transpose()?.unwrap_or(0);
+        let gid = spec.group.as_ref().map(id).transpose()?.unwrap_or(0);
+        let c = CString::new(bytes).expect("a path without a nul in it");
+        if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("give {} to {uid}:{gid}", path.display()));
+        }
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(spec.mode))
+            .with_context(|| format!("give {} the mode {:o}", path.display(), spec.mode))?;
+        made.push((spec.name.clone(), fd));
+    }
+    Ok(made)
 }
 
 /// Lock in memory every file the running programs have mapped or open on

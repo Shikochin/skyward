@@ -556,6 +556,13 @@ fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     for run in owners {
         let (uid, gid) = (id(&run.user)?, id(&run.group)?);
         for path in &run.paths {
+            // A node the modules this phone's kernel loaded did not make is
+            // left out: the programs that open it are the ones that matter,
+            // and they are started either way.
+            if !std::path::Path::new(path).exists() {
+                let _ = skyward_sys::kmsg(&format!("{path} is not there to give to {}:{}", run.user, run.group));
+                continue;
+            }
             std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("give {path} to {}:{}", run.user, run.group))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(run.mode))
                 .with_context(|| format!("give {path} the mode {:o}", run.mode))?;
@@ -666,6 +673,23 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
     Ok(())
 }
 
+/// Let the recovery run what its policy does not allow, where the
+/// configuration asks for it: a recovery carries no framework of the
+/// installed system's, and the policy a recovery image was built with was
+/// built for the phone that image was made on.
+fn set_permissive() -> bool {
+    use std::fs;
+    const ENFORCE: &str = "/sys/fs/selinux/enforce";
+    let already = fs::read_to_string(ENFORCE).is_ok_and(|v| v.trim() == "0");
+    let now = already || (fs::write(ENFORCE, b"0").is_ok() && fs::read_to_string(ENFORCE).is_ok_and(|v| v.trim() == "0"));
+    let _ = skyward_sys::kmsg(&format!(
+        "the recovery runs {}, {}",
+        if now { "permissive" } else { "enforcing" },
+        if now { "as the configuration asks" } else { "and the policy did not give way" }
+    ));
+    now
+}
+
 /// The recovery service. Its own folder is made and its log kept there from
 /// the start, and adb comes up first so a failure later on can be
 /// inspected, file transfer joining it
@@ -683,19 +707,88 @@ fn recovery() -> Result<()> {
         std::fs::set_permissions(skyward_sys::RUN, std::fs::Permissions::from_mode(0o755))
             .with_context(|| format!("open {} to the recovery's other users", skyward_sys::RUN))?;
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
+        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        // A policy built for the phone this image was made on need not allow
+        // the programs of another build, which a recovery runs with no
+        // framework of the installed system's to fall back on. Where it gives
+        // way, the port is set up again: what the policy refused is asked for
+        // once more now that it is not refused.
+        let permissive = cfg.device.permissive && set_permissive();
+        // Parts of the phone's own recovery expect a recovery program of the
+        // phone maker's and may restart the phone when it does not answer:
+        // they are frozen before this recovery takes over, which leaves them
+        // running as far as init is concerned.
+        #[cfg(target_os = "android")]
+        for name in &cfg.device.freeze {
+            let at = format!("/system/bin/{name}");
+            let line = match crate::services::running(&at) {
+                Some(pid) => match skyward_sys::freeze(pid) {
+                    Ok(()) => format!("froze {name} (pid {pid}), which expects the phone's own recovery"),
+                    Err(e) => format!("{name} (pid {pid}) did not freeze: {e:#}"),
+                },
+                None => format!("{name} was not running, so nothing was frozen"),
+            };
+            skyward_sys::kmsg(&line)?;
+        }
+        // The phone's own recovery puts its port into host mode, where it
+        // offers a stick a computer would; a port that is to be served by a
+        // computer is put back into device mode first, as the same port is
+        // when the system runs.
+        #[cfg(target_os = "android")]
+        for (file, value) in [
+            ("/sys/class/oplus_chg/usb/otg_switch", "0"),
+            ("/sys/bus/platform/devices/a600000.dwc3/mode", "peripheral"),
+            ("/sys/bus/platform/devices/a600000.ssusb/mode", "peripheral"),
+        ] {
+            if Path::new(file).exists() {
+                match std::fs::write(file, value) {
+                    Ok(()) => skyward_sys::kmsg(&format!("wrote {value} to {file}"))?,
+                    Err(e) => skyward_sys::kmsg(&format!("{file} did not take {value}: {e}"))?,
+                }
+            }
+        }
         // A recovery that ended with a function of its own in the port took
         // the port with it; going through "none" takes that function off.
-        if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
-            skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
+        if permissive {
+            if let Err(e) = skyward_sys::usb::switch("adb", std::time::Duration::from_secs(5)) {
+                let _ = skyward_sys::kmsg(&format!("the port did not come back to adb: {e:#}"));
+                skyward_sys::set_prop("sys.usb.config", "adb")?;
+            }
+        } else {
+            if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
+                skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
+            }
+            skyward_sys::set_prop("sys.usb.config", "adb")?;
         }
-        skyward_sys::set_prop("sys.usb.config", "adb")?;
+        // The phone's block devices get their names as ueventd walks them,
+        // which can take a moment after the recovery service starts: a run
+        // that started before then ended and was started again.
+        // The port is handed to a computer once more after the phone's own
+        // init has had its say about it. A port bound while the phone still
+        // held it its own way is one no computer sees: the sideload page,
+        // which takes the port through "none" before it asks for its own
+        // function, is seen at once.
+        #[cfg(target_os = "android")]
+        {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if let Err(e) = skyward_sys::usb::switch("adb", std::time::Duration::from_secs(5)) {
+                let _ = skyward_sys::kmsg(&format!("the port did not come back to adb: {e:#}"));
+                skyward_sys::set_prop("sys.usb.config", "adb")?;
+            } else {
+                let _ = skyward_sys::kmsg("the port is handed to a computer as adb again");
+            }
+        }
         let misc = bcb::misc();
+        let mut waited = 0;
+        while !misc.exists() && waited < 50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            waited += 1;
+        }
         let message = bcb::read(&misc)?;
         let request = message.request();
         if !request.work.lasts() {
             bcb::clear(&misc)?;
         }
-        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
