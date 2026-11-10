@@ -6685,9 +6685,9 @@ impl App {
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
         // The side button lights the torch, and does nothing else: it works
         // the same with the pages awake as with them asleep, as a torch key
-        // on a phone of its own does.
+        // on a phone of its own does. Every press ticks the motor.
         if key == Key::Side {
-            return vec![Effect::Torch];
+            return vec![Effect::Haptic, Effect::Torch];
         }
         // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
@@ -8571,10 +8571,10 @@ mod tests {
     #[test]
     fn the_side_button_lights_the_torch_and_nothing_else() {
         let mut app = App::new(Screen::Home, W, H, PPD);
-        assert_eq!(app.key(Key::Side, 1000), vec![Effect::Torch]);
+        assert_eq!(app.key(Key::Side, 1000), vec![Effect::Haptic, Effect::Torch], "every press ticks the motor");
         // It works the same with the pages asleep, and does not light them.
         app.sleep(2000);
-        assert_eq!(app.key(Key::Side, 3000), vec![Effect::Torch]);
+        assert_eq!(app.key(Key::Side, 3000), vec![Effect::Haptic, Effect::Torch]);
         assert!(!app.display_on(), "the torch does not light the pages");
         // The pages say which it is.
         app.wake(4000);
