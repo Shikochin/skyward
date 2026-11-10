@@ -3,7 +3,7 @@
 //! beside it while file transfer is on.
 
 use crate::{prop, set_prop, wait_prop};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,4 +46,18 @@ pub fn set(config: &str, timeout: Duration) -> Result<()> {
 pub fn switch(config: &str, timeout: Duration) -> Result<()> {
     set("none", timeout)?;
     set(config, timeout)
+}
+
+/// Hand the port to what rests: file transfer beside adb, or adb alone
+/// when that does not take, since a recovery no computer can reach is
+/// worse than one without file transfer.
+pub fn switch_resting(timeout: Duration) -> Result<()> {
+    let wanted = resting();
+    match switch(wanted, timeout) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            set_mtp(false);
+            switch("adb", timeout).with_context(|| format!("the port did not take {wanted}, and adb alone after it did not take it either: {e:#}"))
+        }
+    }
 }

@@ -1159,7 +1159,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // storage while that is open; one that does not start says why on
     // screen, and the recovery carries on.
     let mut transfer: Option<Transfer> = None;
-    if app.state.file_transfer {
+    if app.state.file_transfer && cfg.device.mtp {
         match Transfer::start(cfg, &info, app.state.time_zone) {
             Ok(t) => transfer = Some(t),
             Err(e) => {
@@ -1331,7 +1331,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // The port came up with adb alone; at rest it offers file transfer
     // beside it.
     if transfer.is_some() && !fastboot && !sideloading {
-        if let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT) {
+        if let Err(e) = skyward_sys::usb::switch_resting(USB_TIMEOUT) {
             skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
             app.report(&format!("{e:#}"), monotonic_ms());
         }
@@ -2602,7 +2602,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // init stops fastbootd as the port goes through "none";
                     // then the slot's partitions come up as at boot.
                     Effect::EnterRecovery => {
-                        skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)?;
+                        skyward_sys::usb::switch_resting(USB_TIMEOUT)?;
                         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
                         crate::prepare(cfg, slot)?;
                         read_at = Instant::now();
@@ -2615,6 +2615,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                     // A port that something else has takes file transfer
                     // on, or leaves it, when it comes back to rest.
+                    Effect::FileTransfer(on) if !cfg.device.mtp => {
+                        let said = skyward_ui::fmt::transfer_failed(app.state.lang, "this phone's recovery sets up no file transfer");
+                        app.file_transfer_failed(on, &said, now);
+                    }
                     Effect::FileTransfer(on) => {
                         let rests = !fastboot && !sideloading;
                         match (on, transfer.take()) {
@@ -2622,7 +2626,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                                 Ok(t) => {
                                     transfer = Some(t);
                                     if rests {
-                                        if let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT) {
+                                        if let Err(e) = skyward_sys::usb::switch_resting(USB_TIMEOUT) {
                                             skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
                                             app.report(&format!("{e:#}"), now);
                                         }
