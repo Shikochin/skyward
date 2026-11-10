@@ -337,7 +337,38 @@ fn say_framework(dir: &Path) -> Result<usize> {
 fn describes(text: &str, name: &str) -> bool {
     let Some((interface, instance)) = name.rsplit_once('/') else { return false };
     let Some((package, interface)) = interface.rsplit_once('.') else { return false };
-    text.contains(package) && text.contains(&format!("{interface}/{instance}"))
+    // A manifest writes the interface and the instance either as the one
+    // name the service directory knows them by, `IWeaver/default`, or as the
+    // two of them apart, `<name>IWeaver</name>` and `<instance>default</instance>`,
+    // as the phone's own manifests of its hardware services do. Whitespace is
+    // no part of either, and a name may be written across lines.
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let whole = compact.contains(&format!("{interface}/{instance}"));
+    let apart = compact.contains(&format!("<name>{interface}</name>")) && compact.contains(&format!("<instance>{instance}</instance>"));
+    compact.contains(package) && (whole || apart)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::describes;
+
+    #[test]
+    fn a_service_is_found_however_its_manifest_writes_its_name() {
+        let apart = r#"<manifest version="1.0" type="device">
+            <hal format="aidl">
+                <name>android.hardware.weaver</name>
+                <version>2</version>
+                <interface><name>IWeaver</name><instance>default</instance></interface>
+            </hal>
+        </manifest>"#;
+        assert!(describes(apart, "android.hardware.weaver.IWeaver/default"));
+        let whole = r#"<manifest version="1.0" type="device">
+            <hal format="aidl"><name>android.hardware.gatekeeper</name><fqname>IGatekeeper/default</fqname></hal>
+        </manifest>"#;
+        assert!(describes(whole, "android.hardware.gatekeeper.IGatekeeper/default"));
+        assert!(!describes(whole, "android.hardware.weaver.IWeaver/default"));
+        assert!(!describes(apart, "android.hardware.weaver.IWeaver/strongbox"));
+    }
 }
 
 /// Wait until the service directory is a new process and takes calls
