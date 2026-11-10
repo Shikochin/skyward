@@ -214,6 +214,10 @@ pub struct Haptics {
     /// The file the driver says the motor's resonant frequency in, in
     /// tenths of a hertz whatever its label.
     pub resonance: String,
+    /// The frequency the motor swings at, in hertz, for a driver whose
+    /// file says nothing of it until the phone's own system has played it.
+    #[serde(default)]
+    pub frequency_hz: Option<f32>,
     pub strength: Strength,
 }
 
@@ -623,6 +627,9 @@ impl DeviceConfig {
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
         if let Some(haptics) = &cfg.haptics {
+            if let Some(hz) = haptics.frequency_hz {
+                ensure!(hz > 0.0, "[haptics] frequency_hz: the motor cannot swing at {hz} Hz");
+            }
             let file = &haptics.resonance;
             ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
             let Strength { lightest, strongest } = haptics.strength;

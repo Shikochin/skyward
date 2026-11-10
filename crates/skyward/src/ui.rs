@@ -1067,7 +1067,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
-    let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
+    // A motor that cannot be opened is no reason to keep the pages from
+    // coming up: the reason goes to the kernel log and the pages go without.
+    let mut haptics = match cfg.haptics.as_ref().map(Haptics::open).transpose() {
+        Ok(haptics) => haptics,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("the vibration motor is left out: {e:#}"))?;
+            None
+        }
+    };
     let mut backlight = Backlight::open()?;
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
