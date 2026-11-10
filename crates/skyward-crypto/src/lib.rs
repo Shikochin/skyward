@@ -1,5 +1,6 @@
 pub mod fscrypt;
 pub mod gatekeeper;
+pub mod keep;
 pub mod keystore;
 pub mod locksettings;
 pub mod sharedsecret;

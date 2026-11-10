@@ -43,6 +43,9 @@ pub struct Settings {
     /// own configuration has yet to be overridden.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aod: Option<bool>,
+    /// The screen lock the recovery was given is kept, to open the data
+    /// partition with it at the next start.
+    pub remember: bool,
     /// The brightness slider's place, from 0 at its left end to 1.
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, in seconds; 0
@@ -128,6 +131,7 @@ impl Settings {
             dark: state.dark,
             auto_dark: state.auto_dark,
             aod: Some(state.aod),
+            remember: state.remember,
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
@@ -182,6 +186,7 @@ impl Settings {
         if let Some(on) = self.aod {
             state.aod = on;
         }
+        state.remember = self.remember;
         if (0.0..=1.0).contains(&self.brightness) {
             state.brightness = self.brightness;
         }

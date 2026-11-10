@@ -563,6 +563,9 @@ pub enum Switch {
     AutoDark,
     /// Show the time and the battery while the pages sleep.
     Aod,
+    /// Keep the screen lock the recovery was given, to open the data
+    /// partition with it at the next start.
+    Remember,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -1590,6 +1593,9 @@ pub struct State {
     /// The panel shows the time while the pages sleep, as the phone's own
     /// system does: the always-on screen.
     pub aod: bool,
+    /// The screen lock the recovery was given is kept, to open the data
+    /// partition with it at the next start.
+    pub remember: bool,
     /// The hour the local clock last read, as `set_local_time` was told it.
     pub local_hour: Option<u8>,
     pub brightness: f32,
@@ -1771,6 +1777,7 @@ impl Default for State {
             dark: false,
             auto_dark: false,
             aod: false,
+            remember: false,
             local_hour: None,
             brightness: SLIDER_START,
             // Two minutes.
@@ -1978,6 +1985,8 @@ pub enum Effect {
     Screenshot { storage: bool },
     /// Offer internal storage to a computer over USB, or stop.
     FileTransfer(bool),
+    /// Keep the screen lock the recovery was given, or forget the one kept.
+    Remember(bool),
     /// Start receiving a package over USB.
     Sideload,
     /// Start installing the file at this path from the top of a place,
@@ -5501,6 +5510,7 @@ impl App {
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::AutoDark => &mut self.state.auto_dark,
                     Switch::Aod => &mut self.state.aod,
+                    Switch::Remember => &mut self.state.remember,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
@@ -5508,6 +5518,9 @@ impl App {
                 self.refresh();
                 if switch == Switch::AutoDark {
                     self.by_the_clock();
+                }
+                if switch == Switch::Remember {
+                    return vec![Effect::Remember(now_on)];
                 }
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
@@ -8517,6 +8530,18 @@ mod tests {
         assert!(app.state.aod, "the switch turns it on");
         tap_at(&mut app, &f, &i, Action::Toggle(Switch::Aod), 2000);
         assert!(!app.state.aod, "and off again");
+    }
+
+    #[test]
+    fn the_settings_page_keeps_the_screen_lock_only_when_asked() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.frame(&f, &i);
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::Remember)), "the switch is on the settings page");
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Remember)), vec![Effect::Remember(true)], "the recovery is told to keep it");
+        assert!(app.state.remember, "the switch is on");
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Remember)), vec![Effect::Remember(false)], "and to forget it");
+        assert!(!app.state.remember);
     }
 
     #[test]

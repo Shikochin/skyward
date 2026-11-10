@@ -174,6 +174,7 @@ const LANGUAGE: Text = ["语言", "語言", "Language"];
 const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
 const AUTO_DARK: Text = ["自动深浅色", "自動深淺色", "Automatic dark"];
 const AOD: Text = ["息屏显示", "息屏顯示", "Always-on screen"];
+const REMEMBER: Text = ["记住解锁密码", "記住解鎖密碼", "Remember the screen lock"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
@@ -387,10 +388,16 @@ pub fn settings(cx: &Ctx) -> Frame {
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
         Row::new(l.pick(AOD)).icon(SLATE, Icon::Clock).trail(Trail::Switch(s.aod)),
+        Row::new(l.pick(REMEMBER)).icon(SLATE, Icon::Lock).trail(Trail::Switch(s.remember)),
     ]);
     out.extend(hits(
         &general.rows,
-        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Toggle(Switch::Aod)],
+        &[
+            Action::Open(Screen::Language),
+            Action::Open(Screen::TimeZone),
+            Action::Toggle(Switch::Aod),
+            Action::Toggle(Switch::Remember),
+        ],
     ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
