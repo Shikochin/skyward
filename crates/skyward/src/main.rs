@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 mod backup;
 #[cfg(target_os = "android")]
+mod boot;
+#[cfg(target_os = "android")]
 mod decrypt;
 #[cfg(target_os = "android")]
 mod filework;
@@ -840,9 +842,18 @@ fn recovery() -> Result<()> {
             // partitions the system asks for, as in Android's own recovery:
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
+            // The screen comes up before the phone's partitions do, so that
+            // the wait for them is an animation rather than a dark screen.
+            let booting = crate::boot::start(cfg.display.density);
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 prepare(&cfg, booted_slot()?)?;
+                let report = boot_report(&cfg);
+                let _ = std::fs::write("/skyward/run/boot.log", &report);
+                let _ = skyward_sys::kmsg(&format!("boot report of {} lines written", report.lines().count()));
             }
+            // The pages take the screen from the animation, which lets go of
+            // it first.
+            drop(booting);
             let root = Path::new("/");
             ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
         }

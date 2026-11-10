@@ -81,7 +81,7 @@ const SCREENSHOTS: &str = "DCIM/Screenshots";
 const HELD_SCREENSHOTS: &str = "/skyward/run/screenshots";
 
 /// The panel backlight under /sys/class/backlight.
-struct Backlight {
+pub(crate) struct Backlight {
     path: PathBuf,
     /// The raw level at the top of the slider: the panel's normal maximum.
     top: u32,
@@ -90,7 +90,7 @@ struct Backlight {
 }
 
 impl Backlight {
-    fn open() -> Result<Self> {
+    pub(crate) fn open() -> Result<Self> {
         let mut dirs: Vec<PathBuf> = fs::read_dir("/sys/class/backlight")
             .context("read /sys/class/backlight")?
             .map(|e| e.map(|e| e.path()))
@@ -110,14 +110,22 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let max = read("max_brightness")?;
+        // A panel whose device tree gives its normal maximum in none of the
+        // properties [`NORMAL_MAX`] names, as a phone that is not Xiaomi's
+        // does, still lights: the whole range is its normal maximum, and the
+        // brightness slider reaches all of it.
+        let top = normal_max(max).unwrap_or_else(|e| {
+            eprintln!("backlight: {e:#}; the whole range is the normal maximum");
+            max
+        });
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }
 
     /// Light the panel at `level` of its normal maximum, or turn it off
     /// with `None`. The file is written only when the raw level changes.
-    fn show(&mut self, level: Option<f32>) -> Result<()> {
+    pub(crate) fn show(&mut self, level: Option<f32>) -> Result<()> {
         let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.top as f32).round() as u32).max(1));
         if raw != self.level {
             fs::write(&self.path, raw.to_string()).with_context(|| format!("write {}", self.path.display()))?;

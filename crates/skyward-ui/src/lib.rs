@@ -1,4 +1,5 @@
 pub mod app;
+pub mod boot;
 pub mod canvas;
 pub mod charge;
 pub mod color;
