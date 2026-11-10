@@ -1596,6 +1596,8 @@ pub struct State {
     /// The screen lock the recovery was given is kept, to open the data
     /// partition with it at the next start.
     pub remember: bool,
+    /// The torch is on, as the pages last asked for it.
+    pub torch: bool,
     /// The hour the local clock last read, as `set_local_time` was told it.
     pub local_hour: Option<u8>,
     pub brightness: f32,
@@ -1778,6 +1780,7 @@ impl Default for State {
             auto_dark: false,
             aod: false,
             remember: false,
+            torch: false,
             local_hour: None,
             brightness: SLIDER_START,
             // Two minutes.
@@ -1956,6 +1959,9 @@ pub enum Key {
     VolumeUp,
     VolumeDown,
     Back,
+    /// The side button of the phone, which its own system gives to the
+    /// camera or the torch.
+    Side,
 }
 
 /// Where a screenshot went.
@@ -1987,6 +1993,8 @@ pub enum Effect {
     FileTransfer(bool),
     /// Keep the screen lock the recovery was given, or forget the one kept.
     Remember(bool),
+    /// Light the torch, or put it out.
+    Torch,
     /// Start receiving a package over USB.
     Sideload,
     /// Start installing the file at this path from the top of a place,
@@ -3399,6 +3407,18 @@ impl App {
         };
         self.state.code.clear();
         self.refresh();
+    }
+
+    /// The torch was lit, or put out: the pages say which.
+    pub fn torch(&mut self, on: bool, now: u64) {
+        self.state.torch = on;
+        let (l, said) = (self.state.lang, on);
+        let text = if said {
+            l.pick(["手电筒已打开", "手電筒已打開", "The torch is on"])
+        } else {
+            l.pick(["手电筒已关闭", "手電筒已關閉", "The torch is off"])
+        };
+        self.say(text, now);
     }
 
     /// The data partition is being opened, before the page that would ask
@@ -6663,6 +6683,12 @@ impl App {
     /// goes down first waits [`CHORD_MS`] for the other, or until it is let
     /// go, and then does what it does alone, as pressed when it went down.
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
+        // The side button lights the torch, and does nothing else: it works
+        // the same with the pages awake as with them asleep, as a torch key
+        // on a phone of its own does.
+        if key == Key::Side {
+            return vec![Effect::Torch];
+        }
         // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
         self.end_turn();
@@ -6732,6 +6758,9 @@ impl App {
     /// held is timed from when it went down, the screen goes off from now.
     fn key_down(&mut self, key: Key, at: u64, now: u64) -> Vec<Effect> {
         match key {
+            // The side button never reaches here: it lights the torch before
+            // anything else looks at it.
+            Key::Side => Vec::new(),
             Key::Back => {
                 self.button = Some((key, Press::Spent));
                 self.act(Action::Back, at)
@@ -8537,6 +8566,22 @@ mod tests {
         assert!(app.state.aod, "the switch turns it on");
         tap_at(&mut app, &f, &i, Action::Toggle(Switch::Aod), 2000);
         assert!(!app.state.aod, "and off again");
+    }
+
+    #[test]
+    fn the_side_button_lights_the_torch_and_nothing_else() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(app.key(Key::Side, 1000), vec![Effect::Torch]);
+        // It works the same with the pages asleep, and does not light them.
+        app.sleep(2000);
+        assert_eq!(app.key(Key::Side, 3000), vec![Effect::Torch]);
+        assert!(!app.display_on(), "the torch does not light the pages");
+        // The pages say which it is.
+        app.wake(4000);
+        app.torch(true, 4010);
+        assert!(app.state.torch);
+        app.torch(false, 4020);
+        assert!(!app.state.torch);
     }
 
     #[test]

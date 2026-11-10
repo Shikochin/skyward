@@ -2229,6 +2229,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // Leaving is the user's answer to whatever the request
                     // still kept in misc asked.
                     Effect::Reboot(target) => {
+                        // A torch left lit would go with the phone into the
+                        // system, or into a start that lights it again.
+                        if crate::torch::is_on() {
+                            let _ = crate::torch::set(false);
+                        }
                         if kept {
                             bcb::clear(&misc)?;
                             kept = false;
@@ -2404,6 +2409,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         let job = decrypt::Job::Unlock { closed: closed.clone(), user, credential };
                         decryptor = Some(Decryptor::start(job)?);
                     }
+                    // The side button lights the torch, or puts it out.
+                    Effect::Torch => match crate::torch::toggle() {
+                        Ok(on) => app.torch(on, now),
+                        Err(e) => {
+                            skyward_sys::kmsg(&format!("the torch is not lit: {e:#}"))?;
+                            app.report(&format!("{e:#}"), now);
+                        }
+                    },
                     // Turning the switch off forgets what was kept.
                     Effect::Remember(false) => match crate::remember::forget() {
                         Ok(()) => skyward_sys::kmsg("the kept screen lock is forgotten")?,

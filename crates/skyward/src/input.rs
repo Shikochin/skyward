@@ -43,6 +43,10 @@ fn key_of(code: KeyCode) -> Option<Key> {
         KeyCode::KEY_VOLUMEUP => Some(Key::VolumeUp),
         KeyCode::KEY_VOLUMEDOWN => Some(Key::VolumeDown),
         KeyCode::KEY_BACK => Some(Key::Back),
+        // The side button of the phone, which its own system gives to the
+        // camera or the torch: the driver reports it as a trigger-happy
+        // button of its own.
+        KeyCode::BTN_TRIGGER_HAPPY32 => Some(Key::Side),
         _ => None,
     }
 }
