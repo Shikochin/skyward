@@ -37,6 +37,8 @@ pub struct Settings {
     /// names none, as fastboot's does.
     pub spoken: Option<String>,
     pub dark: bool,
+    /// The pages go dark by themselves at night, from 19:00 to 7:00.
+    pub auto_dark: bool,
     /// The brightness slider's place, from 0 at its left end to 1.
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, in seconds; 0
@@ -120,6 +122,7 @@ impl Settings {
             language: state.language_chosen.then(|| state.lang.tag().to_string()),
             spoken: Some(state.lang.tag().to_string()),
             dark: state.dark,
+            auto_dark: state.auto_dark,
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             time_zone: TIME_ZONES[state.time_zone].2.to_string(),
@@ -170,6 +173,7 @@ impl Settings {
             state.language_chosen = true;
         }
         state.dark = self.dark;
+        state.auto_dark = self.auto_dark;
         if (0.0..=1.0).contains(&self.brightness) {
             state.brightness = self.brightness;
         }

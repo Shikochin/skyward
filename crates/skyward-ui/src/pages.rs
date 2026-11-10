@@ -172,6 +172,7 @@ const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
 const LANGUAGE: Text = ["语言", "語言", "Language"];
 const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
+const AUTO_DARK: Text = ["自动深浅色", "自動深淺色", "Automatic dark"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
@@ -355,7 +356,17 @@ pub fn settings(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let themes = widgets::theme_picker(&mut c, t, f, l, top + t.m.dp(8.9));
     out.extend(hits(&themes.rows, &[Action::Theme { dark: false }, Action::Theme { dark: true }]));
-    let mut y = widgets::section(&mut c, t, f, themes.bottom, l.pick(["亮度", "亮度", "Brightness"]));
+    // The pages go dark by themselves at night, where that is asked.
+    let look = widgets::section(&mut c, t, f, themes.bottom, l.pick(["外观", "外觀", "Appearance"]));
+    let auto = widgets::list(&mut c, t, f, look, &[Row::new(l.pick(AUTO_DARK)).trail(Trail::Switch(s.auto_dark))]);
+    out.extend(hits(&auto.rows, &[Action::Toggle(Switch::AutoDark)]));
+    let said = l.pick([
+        "开启后，19:00 到 7:00 用深色，其余时间用浅色。",
+        "開啟後，19:00 到 7:00 用深色，其餘時間用淺色。",
+        "When on, the pages are dark from 19:00 to 7:00 and light the rest of the day.",
+    ]);
+    let mut y = widgets::footnote(&mut c, t, f, auto.bottom, said);
+    y = widgets::section(&mut c, t, f, y, l.pick(["亮度", "亮度", "Brightness"]));
     let off = fmt::screen_off(l, SCREEN_OFF[s.screen_off]);
     let below = Row::new(l.pick(SCREEN_TIMEOUT)).trail(Trail::Value(&off));
     let slider = widgets::slider_card(&mut c, t, f, y, Caption::Sun, l.pick(["屏幕亮度", "螢幕亮度", "Screen brightness"]), s.brightness, Some(below));

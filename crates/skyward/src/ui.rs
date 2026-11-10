@@ -1404,6 +1404,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         let time = clock(app.state.time_zone)?;
         if time != shown_clock {
+            // The pages go dark by the clock where that is asked, and the
+            // status bar shows the time they go by.
+            app.set_local_time(&time);
             shown_clock = time;
             app.redraw();
         }

@@ -559,6 +559,8 @@ pub enum Switch {
     Wlan,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
+    /// Go dark by the clock: dark from 19:00 to 7:00, light the rest.
+    AutoDark,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -1581,6 +1583,10 @@ pub struct State {
     /// start, where otherwise it is the one the system names.
     pub language_chosen: bool,
     pub dark: bool,
+    /// The pages go dark by themselves at night, from 19:00 to 7:00.
+    pub auto_dark: bool,
+    /// The hour the local clock last read, as `set_local_time` was told it.
+    pub local_hour: Option<u8>,
     pub brightness: f32,
     /// How long the screen stays on with nothing touched, by its place in
     /// [`SCREEN_OFF`].
@@ -1758,6 +1764,8 @@ impl Default for State {
             lang: Lang::Hans,
             language_chosen: false,
             dark: false,
+            auto_dark: false,
+            local_hour: None,
             brightness: SLIDER_START,
             // Two minutes.
             screen_off: 3,
@@ -4711,6 +4719,30 @@ impl App {
         self.dirty = true;
     }
 
+    /// The local clock reads `clock`, as the status bar writes it: where the
+    /// pages go dark by themselves, they do it from 19:00 to 7:00.
+    pub fn set_local_time(&mut self, clock: &str) {
+        let hour = clock.split(':').next().and_then(|h| h.parse::<u8>().ok());
+        if self.state.local_hour == hour {
+            return;
+        }
+        self.state.local_hour = hour;
+        self.by_the_clock();
+    }
+
+    /// The pages go dark or light as the clock says, where they go by it.
+    fn by_the_clock(&mut self) {
+        if !self.state.auto_dark {
+            return;
+        }
+        let Some(hour) = self.state.local_hour else { return };
+        let dark = hour >= 19 || hour < 7;
+        if dark != self.state.dark {
+            self.state.dark = dark;
+            self.refresh();
+        }
+    }
+
     /// Open `screen` over the page shown, sliding in over it.
     fn open(&mut self, screen: Screen) {
         self.leave(false);
@@ -5172,11 +5204,15 @@ impl App {
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::AutoDark => &mut self.state.auto_dark,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
                 let now_on = *on;
                 self.refresh();
+                if switch == Switch::AutoDark {
+                    self.by_the_clock();
+                }
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
                 }
@@ -7779,10 +7815,16 @@ mod tests {
         let t = Theme::light(W, H, PPD);
         let mut app = App::new(Screen::Settings, W, H, PPD);
         let mut c = Canvas::new(W, H);
-        let row = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Toggle(Switch::Vibrate)).expect("on the settings page").rect;
+        let row = app
+            .frame(&f, &i)
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Toggle(Switch::AutoDark))
+            .expect("a row of the settings page on screen")
+            .rect;
         let (x, y) = (W as f32 * 0.6, row.y + row.h / 2.0);
-        tap_at(&mut app, &f, &i, Action::Toggle(Switch::Vibrate), 1000);
-        assert!(!app.state.vibrate, "the tap worked the switch");
+        tap_at(&mut app, &f, &i, Action::Toggle(Switch::AutoDark), 1000);
+        assert!(app.state.auto_dark, "the tap worked the switch");
         app.compose(&mut c, &f, &i, "12:00", 1040);
         let held = grey_at(&c, x, y);
         assert!(held < t.pal.card.r, "held from the lift: {held}");
