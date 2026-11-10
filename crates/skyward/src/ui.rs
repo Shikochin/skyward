@@ -1109,6 +1109,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         app.set_boot_slots(read_slots());
     }
     app.set_asked(asked(&request));
+    // A phone no computer and no finger can reach shows what the recovery
+    // service found on it before the pages started.
+    if cfg.device.diagnose {
+        let path = "/skyward/run/boot.log";
+        if let Ok(bytes) = std::fs::read(path) {
+            app.text_opened(&fonts, path.to_string(), Ok(Some(bytes)), 0);
+        }
+    }
     // Opening the data partition, or a user's own files in it, under way,
     // and the users whose own files are still closed once it is open.
     let mut decryptor: Option<Decryptor> = None;

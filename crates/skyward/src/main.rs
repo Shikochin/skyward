@@ -867,6 +867,146 @@ fn recovery() -> Result<()> {
     })
 }
 
+/// What the recovery service found on the phone before the pages started,
+/// written for the page that shows it: a recovery no computer and no finger
+/// can reach has no other way to say why its parts did not come up.
+#[cfg(target_os = "android")]
+fn boot_report(cfg: &DeviceConfig) -> String {
+    use std::fmt::Write as _;
+    use std::path::Path;
+    let mut out = String::new();
+    let _ = writeln!(out, "skyward {} — boot report", skyward_info::VERSION);
+    let _ = writeln!(out, "device: {} ({})", cfg.device.codename, cfg.device.model);
+    let _ = writeln!(
+        out,
+        "boot: reason={:?} sys={:?} uptime={}s",
+        skyward_sys::prop("ro.boot.bootreason"), skyward_sys::prop("sys.boot.reason"),
+        std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split('.').next().and_then(|s| s.parse::<u64>().ok())).unwrap_or(0)
+    );
+    let bcb = skyward_sys::bcb::read(&skyward_sys::bcb::misc()).map(|m| format!("{:?} {:?}", m.command, m.args)).unwrap_or_else(|e| format!("unreadable: {e}"));
+    let _ = writeln!(out, "misc: {bcb}");
+    let phoenix = crate::services::running("/system/bin/phoenix_recovery").map_or_else(|| "no".to_string(), |pid| format!("pid {pid}"));
+    let _ = writeln!(out, "phoenix: {phoenix}  battery={}C", std::fs::read_to_string("/sys/class/power_supply/battery/temp").map(|t| format!("{:.1}", t.trim().parse::<f64>().unwrap_or(0.0) / 10.0)).unwrap_or_default());
+
+    let enforce = std::fs::read_to_string("/sys/fs/selinux/enforce").unwrap_or_default();
+    let _ = writeln!(out, "selinux: enforce={}", enforce.trim());
+    let mounted = |at: &str| skyward_block::mount::is_mount_point(Path::new(at)).unwrap_or(false);
+    let _ = writeln!(
+        out,
+        "mounted: vendor={} odm={} vendor_dlkm={} system_dlkm={} metadata={}",
+        mounted("/vendor"), mounted("/odm"), mounted("/vendor_dlkm"), mounted("/system_dlkm"), mounted("/metadata")
+    );
+    let there = |at: &str| if Path::new(at).exists() { "yes" } else { "NO" };
+    // The touch program is wherever the configuration says it is: the one
+    // the image carries, or the installed system's.
+    let touch = cfg.services.iter().find(|s| s.path.contains("touch")).map_or("/odm/bin/hw/vendor-oplus-hardware-touch-V2-hbp5-service", |s| s.path.as_str());
+    let _ = writeln!(
+        out,
+        "touch: service={} at={} hbp_core={} hbp0={} sockets={}",
+        there(touch), touch, there("/dev/hbp_core"), there("/dev/hbp0"), there("/dev/socket/hidl2touchdaemon_client")
+    );
+    let running = |at: &str| crate::services::running(at).map_or_else(|| "no".to_string(), |pid| format!("pid {pid}"));
+    let _ = writeln!(
+        out,
+        "services: touch={} qseecomd={} keymint={}",
+        running(touch),
+        running("/vendor/bin/qseecomd"),
+        running("/vendor/bin/hw/android.hardware.security.onekeymint-service-qti")
+    );
+    let mut states: Vec<String> = Vec::new();
+    if let Ok(dir) = std::fs::read_dir("/sys/class/udc") {
+        for e in dir.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let state = std::fs::read_to_string(e.path().join("state")).unwrap_or_default();
+            states.push(format!("{name}={}", state.trim()));
+        }
+    }
+    states.sort();
+    let otg = std::fs::read_to_string("/sys/class/oplus_chg/usb/otg_switch").unwrap_or_default();
+    let role = std::fs::read_to_string("/sys/class/typec/port0/role").unwrap_or_default();
+    let _ = writeln!(out, "port: otg_switch={} typec_role={} udc=[{}]", otg.trim(), role.trim(), states.join(","));
+    let state = states.first().and_then(|s| s.rsplit_once('=')).map_or(String::new(), |(_, v)| v.to_string());
+    let _ = writeln!(
+        out,
+        "usb: config={:?} state={:?} adbd={:?} udc={}",
+        skyward_sys::prop("sys.usb.config"), skyward_sys::prop("sys.usb.state"), skyward_sys::prop("init.svc.adbd"), state.trim()
+    );
+    let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
+    let loaded: Vec<&str> = modules.lines().filter(|l| l.contains("hbp") || l.contains("tp_")).map(|l| l.split(' ').next().unwrap_or("")).collect();
+    let _ = writeln!(out, "modules: {}", if loaded.is_empty() { "none of touch".to_string() } else { loaded.join(",") });
+    let has = |name: &str| if modules.lines().any(|l| l.starts_with(name)) { "yes" } else { "NO" };
+    // The gadget init sets up for adb, as far as a recovery can see it: the
+    // host only sees what these say.
+    if let Ok(dir) = std::fs::read_dir("/config/usb_gadget/g1/functions") {
+        let mut functions: Vec<String> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        functions.sort();
+        let at = |name: &str| std::fs::read_to_string(format!("/config/usb_gadget/g1/{name}")).map(|s| s.trim().to_string()).unwrap_or_default();
+        let f1 = std::fs::read_link("/config/usb_gadget/g1/configs/b.1/f1").map_or_else(|_| "none".to_string(), |p| p.display().to_string());
+        let _ = writeln!(
+            out,
+            "gadget: vid={} pid={} udc={} f1={f1} functions=[{}] serial={:?}",
+            at("idVendor"), at("idProduct"), at("UDC"), functions.join(","), skyward_sys::prop("ro.serialno")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "usb gadget: ffs_mounted={} configfs={} usb_f_fs={} libcomposite={} ffs_ready={:?} ep0={}",
+        mounted("/dev/usb-ffs/adb"), there("/config/usb_gadget/g1"), has("usb_f_fs"), has("libcomposite"),
+        skyward_sys::prop("sys.usb.ffs.ready"), there("/dev/usb-ffs/adb/ep0")
+    );
+    let log = std::fs::read_to_string(skyward_sys::LOG).unwrap_or_default();
+    let tail: Vec<&str> = log.lines().rev().filter(|l| {
+        !l.trim_start().starts_with('/')
+            && ["not brought up", "not mounted", "missing", "not started", "failed", "did not", "denied", "has no account"].iter().any(|k| l.contains(k))
+    }).take(8).map(|l| l.trim_start_matches(|c: char| c == '[' || c.is_ascii_digit() || c == '.' || c == ' ' || c == ']')).collect();
+    let _ = writeln!(out, "-- last steps that did not go --");
+    for line in tail.iter().rev() {
+        let _ = writeln!(out, "{line}");
+    }
+    // What the touch program itself said, which is the first thing a recovery
+    // that runs the phone's own program has to go by.
+    let name = Path::new(touch).file_name().map_or_else(|| "touch".to_string(), |n| n.to_string_lossy().into_owned());
+    let said = std::fs::read_to_string(format!("{}/{name}.log", skyward_sys::RUN)).unwrap_or_default();
+    let lines: Vec<&str> = said.lines().rev().take(10).collect();
+    let _ = writeln!(out, "-- {name} said ({} lines) --", said.lines().count());
+    for line in lines.iter().rev() {
+        let cut: String = line.chars().take(100).collect();
+        let _ = writeln!(out, "{cut}");
+    }
+    // The kernel's own record of a start that went wrong, if the phone
+    // keeps one: mounted here, since a recovery's init does not.
+    if !skyward_block::mount::is_mount_point(Path::new("/sys/fs/pstore")).unwrap_or(false) {
+        let _ = std::fs::create_dir_all("/sys/fs/pstore");
+        let _ = skyward_block::mount::mount(Path::new("pstore"), Path::new("/sys/fs/pstore"), "pstore", &[]);
+    }
+    if let Ok(dir) = std::fs::read_dir("/sys/fs/pstore") {
+        let names: Vec<String> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let _ = writeln!(out, "-- pstore: {} --", if names.is_empty() { "none".to_string() } else { names.join(",") });
+        for name in &names {
+            if let Ok(text) = std::fs::read_to_string(format!("/sys/fs/pstore/{name}")) {
+                let last: Vec<&str> = text.lines().filter(|l| {
+                    ["panic", "watchdog", "reboot", "thermal", "shutdown", "Power", "reset"].iter().any(|k| l.contains(k))
+                }).rev().take(4).collect();
+                for line in last.iter().rev() {
+                    let cut: String = line.chars().take(90).collect();
+                    let _ = writeln!(out, "{cut}");
+                }
+            }
+        }
+    }
+    if let Ok(klog) = skyward_sys::klog() {
+        let hits: Vec<&str> = klog.lines().rev().filter(|l| {
+            ["avc:", "avc_denied", "skyward:", "module", "usb", "hbp", "touch", "keymint", "qseecom", "selinux"].iter().any(|k| l.contains(k))
+        }).take(12).collect();
+        let _ = writeln!(out, "-- kernel log --");
+        for line in hits.iter().rev() {
+            let cut: String = line.chars().take(90).collect();
+            let _ = writeln!(out, "{cut}");
+        }
+    }
+    out
+}
+
 /// Map and mount the slot's partitions from super, then bring up what runs
 /// from them. Recovery has to stay usable when super cannot be mounted, as
 /// after it is wiped, so the reason goes to the kernel log instead.
