@@ -125,6 +125,10 @@ fn text<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<String> {
 pub struct Phone {
     /// ro.product.device
     pub device: String,
+    /// The other names the phone goes by: the model codes the installed
+    /// odm lists, which a package made for the phone names it by where it
+    /// names the model rather than the codename.
+    pub aliases: Vec<String>,
     /// ro.serialno
     pub serial: String,
     pub installed: Option<Build>,
@@ -147,7 +151,8 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
         return Err(Refusal::NotAb(kind.to_string()));
     }
     let devices = m.get("pre-device").unwrap_or_default();
-    if !listed(&phone.device, devices) {
+    let ours = std::iter::once(&phone.device).chain(phone.aliases.iter());
+    if !ours.clone().any(|name| listed(name, devices)) {
         return Err(Refusal::OtherDevice(devices.to_string()));
     }
     if let Some(serials) = m.get("serialno") {
@@ -210,6 +215,7 @@ METADATA_SIZE=1024
     fn phone() -> Phone {
         Phone {
             device: "ishtar".into(),
+            aliases: Vec::new(),
             serial: "2674dc3e".into(),
             installed: Some(Build { timestamp: 1_778_243_655, security_patch: "2026-04-01".into() }),
         }
@@ -251,6 +257,15 @@ METADATA_SIZE=1024
         assert_eq!(check(&update_with(&ours, PROPERTIES_TEXT), &phone()), Ok(()));
         let block = METADATA_TEXT.replace("ota-type=AB", "ota-type=BLOCK");
         assert_eq!(check(&update_with(&block, PROPERTIES_TEXT), &phone()), Err(Refusal::NotAb("BLOCK".into())));
+    }
+
+    #[test]
+    fn a_package_naming_the_model_installs_on_the_phone_the_model_is() {
+        let model = METADATA_TEXT.replace("pre-device=ishtar", "pre-device=OP64DDL1");
+        let phone = Phone { device: "fairlady".into(), aliases: vec!["OP64DDL1".into()], ..phone() };
+        assert_eq!(check(&update_with(&model, PROPERTIES_TEXT), &phone), Ok(()));
+        let other = METADATA_TEXT.replace("pre-device=ishtar", "pre-device=OP64DDL2");
+        assert_eq!(check(&update_with(&other, PROPERTIES_TEXT), &phone), Err(Refusal::OtherDevice("OP64DDL2".into())));
     }
 
     #[test]

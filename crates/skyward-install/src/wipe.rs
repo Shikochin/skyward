@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     fn phone() -> Phone {
-        Phone { device: "ishtar".into(), serial: "2674dc3e".into(), installed: None }
+        Phone { device: "ishtar".into(), aliases: Vec::new(), serial: "2674dc3e".into(), installed: None }
     }
 
     fn metadata(lines: &[&str]) -> Metadata {

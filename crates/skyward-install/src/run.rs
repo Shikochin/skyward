@@ -685,9 +685,39 @@ fn phone(slot: Slot) -> Result<Phone> {
     };
     Ok(Phone {
         device: prop("ro.product.device").context("ro.product.device is unset")?,
+        aliases: model_names(slot),
         serial: prop("ro.serialno").unwrap_or_default(),
         installed,
     })
+}
+
+/// The other names the phone goes by, from the fingerprint the installed
+/// odm carries: a package made for the phone names it by the model code
+/// there rather than the codename the system goes by.
+fn model_names(slot: Slot) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(parts) = skyward_vab::mounted_partitions(slot) else { return names };
+    let Some(odm) = parts.iter().find(|m| m.partition.strip_suffix(slot.suffix()) == Some("odm")) else { return names };
+    let path = odm.mount_point.join("etc/fingerprint.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return names };
+    for key in ["device", "product", "model", "product_name", "market", "name"] {
+        if let Some(value) = json_string(&text, key) {
+            names.push(value);
+        }
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The string `key` holds in `text`, a fingerprint's flat record.
+fn json_string(text: &str, key: &str) -> Option<String> {
+    let at = text.find(&format!("\"{key}\""))?;
+    let rest = &text[at + key.len() + 2..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Why there is too little charge to install, if there is.

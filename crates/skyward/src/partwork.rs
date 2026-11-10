@@ -159,6 +159,7 @@ fn disable(package_size: u64, tell: &mut dyn FnMut(Event)) -> Result<(), Stop> {
         let bytes = bcb::wipe_package(&bcb::misc(), package_size)?;
         let phone = Phone {
             device: prop("ro.product.device").context("ro.product.device is unset")?,
+            aliases: Vec::new(),
             serial: prop("ro.serialno").unwrap_or_default(),
             installed: None,
         };
