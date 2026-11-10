@@ -218,7 +218,9 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
         let files: &[&str] = match base(m).as_str() {
             "system" => &["system/build.prop"],
             "vendor" => &["default.prop", "build.prop"],
-            _ => &["etc/build.prop"],
+            // ColorOS keeps the version of its ROM in the build.prop at the
+            // root of each my_* partition, and the rest in etc/build.prop.
+            _ => &["build.prop", "etc/build.prop"],
         };
         for f in files {
             let path = m.mount_point.join(f);

@@ -50,12 +50,24 @@ pub struct Other {
 /// the major version Xiaomi gives it, any other by its Android version;
 /// with the build it is, where it says.
 pub fn installed_name(props: &HashMap<String, String>, version_prop: &str) -> Named {
-    let name = match (props.get("ro.mi.os.version.code"), props.get("ro.build.version.release")) {
-        (Some(code), _) => format!("HyperOS {code}"),
-        (None, Some(release)) => format!("Android {release}"),
-        (None, None) => "Android".into(),
+    // Xiaomi names its system HyperOS and gives it a version of its own;
+    // OPPO and OnePlus name theirs ColorOS, whose version the ROM carries;
+    // any other is named by the Android version it is.
+    let name = match (
+        props.get("ro.mi.os.version.code"),
+        props.get("ro.build.version.oplusrom.display"),
+        props.get("ro.build.version.release"),
+    ) {
+        (Some(code), _, _) => format!("HyperOS {code}"),
+        (_, Some(rom), _) => format!("ColorOS {}", rom.split('.').next().unwrap_or(rom)),
+        (None, None, Some(release)) => format!("Android {release}"),
+        (None, None, None) => "Android".into(),
     };
-    let version = props.get(version_prop).or_else(|| props.get("ro.build.display.id")).cloned();
+    let version = props
+        .get(version_prop)
+        .or_else(|| props.get("ro.build.display.id.show"))
+        .or_else(|| props.get("ro.build.display.id"))
+        .cloned();
     Named { name, version }
 }
 
@@ -75,6 +87,15 @@ mod tests {
         assert_eq!(
             installed_name(&custom, "ro.mi.os.version.incremental"),
             Named { name: "Android 16".into(), version: Some("lineage_ishtar-userdebug 16 BP2A".into()) }
+        );
+        let coloros = props(&[
+            ("ro.build.version.release", "17"),
+            ("ro.build.version.oplusrom.display", "17.0.1"),
+            ("ro.build.display.id.show", "PLZ110_17.0.1.200(CN01)"),
+        ]);
+        assert_eq!(
+            installed_name(&coloros, "ro.mi.os.version.incremental"),
+            Named { name: "ColorOS 17".into(), version: Some("PLZ110_17.0.1.200(CN01)".into()) }
         );
     }
 }
