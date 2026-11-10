@@ -1021,6 +1021,31 @@ fn boot_report(cfg: &DeviceConfig) -> String {
     out
 }
 
+/// Point the loader the recovery's own programs ask for by name at the one
+/// the installed system carries: a recovery image built beside a system
+/// image has its programs ask for the bootstrap loader, and a recovery
+/// ramdisk need not carry one. Without it, the filesystem checks the
+/// recovery ships cannot run at all.
+#[cfg(target_os = "android")]
+fn prepare_early_loader() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const LOADER: &str = "/system/bin/bootstrap/linker64";
+    let at = Path::new(LOADER);
+    if at.exists() {
+        return Ok(());
+    }
+    let dir = at.parent().expect("the loader is in a folder");
+    std::fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).with_context(|| format!("open {} to every user", dir.display()))?;
+    let from = ["/mnt/system/system/bin/bootstrap/linker64", "/mnt/system/system/bin/linker64"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .with_context(|| format!("the installed system carries no loader for {LOADER}"))?;
+    std::os::unix::fs::symlink(from, at).with_context(|| format!("point {} at {}", at.display(), from.display()))?;
+    skyward_sys::kmsg(&format!("{} is the installed system's {}", at.display(), from.display()))
+}
+
 /// Map and mount the slot's partitions from super, then bring up what runs
 /// from them. Recovery has to stay usable when super cannot be mounted, as
 /// after it is wiped, so the reason goes to the kernel log instead.
@@ -1033,6 +1058,11 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             }
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
+            }
+            // The filesystem checks the recovery ships ask for a loader the
+            // ramdisk need not carry; the installed system has it.
+            if let Err(e) = prepare_early_loader() {
+                skyward_sys::kmsg(&format!("the loader the recovery's own programs ask for is not there: {e:#}"))?;
             }
             // Without them the screen still shows and the keys still work,
             // so this reason goes to the kernel log as well.
