@@ -2259,6 +2259,10 @@ const FOLD_SETTLE: f32 = 0.5;
 const FOLD_PERIOD: f32 = 0.354;
 /// How far, in dp, a swipe from an edge has to come in to go back.
 const BACK_SWIPE_DP: f32 = 56.0;
+/// How many pages under the one shown are kept drawn, for a swipe to show:
+/// each takes a screen's worth of memory, and three cover the pages most
+/// phones put one over another.
+const KEEP_LEFTS: usize = 3;
 /// The back cue sits this far, in dp, above where the finger came down,
 /// and stays at that height however the finger then wanders.
 const CUE_LIFT_DP: f32 = 9.0;
@@ -2565,12 +2569,37 @@ struct Turn {
     /// Going back: the page in front is the page left; else the page
     /// opened.
     back: bool,
+    /// The page the canvas holds, so that a swipe can tell whether it is
+    /// the one under the page shown.
+    left_screen: Screen,
+    /// How far the slide had come when it was last drawn, from 0, the page
+    /// in front covering the screen, to 1, gone from it: a slide turned back
+    /// while it still opened comes back from where it is.
+    last: f32,
     /// The page left, as it last showed.
     left: Canvas,
     /// How far from the left edge the page in front stands, in thousandths
     /// of the screen's width, as a spring settling where it goes; set off
     /// on the first frame of the slide.
     spring: Option<Spring>,
+}
+
+/// A swipe in from a screen edge: the page shown is kept as it was and
+/// follows the finger over the one beneath, and letting go carries it out
+/// or lets it back, as the system's predictive back does.
+struct Preview {
+    /// The page as it showed when the swipe began, where the layer kept is
+    /// not it: a page not drawn yet.
+    front: Option<Canvas>,
+    /// The page under it, where the canvas kept is not that page: a page
+    /// never drawn, or one gone back from.
+    behind: Option<Canvas>,
+    /// How far the front page has come across: 0 covers the screen, 1 is
+    /// gone from it.
+    along: f32,
+    /// How it returns once the finger lifts, in thousandths of the screen's
+    /// width: the page is back where it was as this reaches 0.
+    settle: Option<Spring>,
 }
 
 /// Whether a control is a row: as wide as the cards it lies on.
@@ -2730,6 +2759,21 @@ pub struct App {
     cols: u32,
     /// The canvas the last page left was drawn on, to draw the next on.
     backdrop: Option<Canvas>,
+    /// The pages under the one shown, the page directly under last, as each
+    /// showed when it was left: a swipe shows the one under the page it
+    /// takes away, however deep the pages go.
+    lefts: Vec<(Screen, Canvas)>,
+    /// A swipe in from a screen edge, the page following the finger over the
+    /// one beneath it, as the system's predictive back does.
+    preview: Option<Preview>,
+    /// The canvas a swipe drew the page on, kept to draw the next one on
+    /// rather than take a screen's worth of memory each time.
+    preview_front: Option<Canvas>,
+    /// A swipe in from an edge that has yet to show its preview, with how
+    /// far the finger has come: the frame that draws the page draws the
+    /// preview too, since drawing a page's rows takes the fonts and the
+    /// phone.
+    preview_wanted: Option<f32>,
     /// How round the screen's corners are, in pixels.
     corners: f32,
     dirty: bool,
@@ -2797,6 +2841,10 @@ impl App {
             stale: Vec::new(),
             cols: 0,
             backdrop: None,
+            lefts: Vec::new(),
+            preview: None,
+            preview_front: None,
+            preview_wanted: None,
             corners: 0.0,
             dirty: true,
             w,
@@ -2849,6 +2897,7 @@ impl App {
                 || self.seek.is_some()
                 || sliding
                 || self.cue.is_some()
+                || self.preview.as_ref().is_some_and(|p| p.settle.is_some())
                 || self.title.moving(now)
                 || self.bar.moving(now)
                 || self.morph.is_some()
@@ -2915,6 +2964,12 @@ impl App {
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
+        // A page a swipe let go of has come back where it was: it shows as
+        // the page it is again.
+        if self.preview.as_ref().is_some_and(|p| p.settle.as_ref().is_some_and(|s| s.at(now).1)) {
+            self.preview_front = self.preview.take().and_then(|p| p.front);
+            self.dirty = true;
+        }
         // The key waiting for its partner in a screenshot, left alone long
         // enough, does what it does alone.
         if self.chord.is_some_and(|(_, at)| now >= at + CHORD_MS) {
@@ -4267,9 +4322,16 @@ impl App {
     /// left, the status bar, any message, and the back cue while a swipe
     /// from an edge is under way.
     fn compose_page(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
-        // A page opened is drawn from its left edge as it slides in.
+        // A page opened is drawn from its left edge as it slides in. A page
+        // a swipe has in hand is kept as it was drawn: it is not drawn again
+        // while the finger moves it.
         let opening = self.turn.as_ref().is_some_and(|t| !t.back);
-        self.render(f, info, if opening { 0 } else { self.w });
+        // A page a swipe has in hand is not drawn again while the finger
+        // moves it, unless what was drawn has been let go of since, as a
+        // change to the page does.
+        if self.preview.is_none() || self.frame.is_none() {
+            self.render(f, info, if opening { 0 } else { self.w });
+        }
         let screen = self.screen();
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
@@ -4335,12 +4397,19 @@ impl App {
         if let (Some(press), None) = (self.row_press.filter(|p| now >= p.rise), &self.row_art) {
             let page = &self.frame.as_ref().expect("rendered above").canvas;
             let (x, y, w, h) = row_part(press.rect, page);
+            // A row the page was not drawn with, as one off the part kept
+            // for the screen, has no art to make of it.
+            let held = page.held();
+            if y < held.start || y + h > held.end {
+                self.row_press = None;
+            } else {
             let pressed = t.pressed();
             let band = Band { rows: (y, y + h), cols: (x, x + w) };
             let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
             let down = pages::render(screen, &cx).canvas;
             assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
+            }
         }
         let view = View {
             scroll,
@@ -4352,6 +4421,24 @@ impl App {
             row: self.row_press.map_or(0.0, |p| p.level(now)),
             pressing: self.pressing(),
         };
+        if let Some(travel) = self.preview_wanted.take() {
+            self.begin_preview(f, info, now);
+            self.preview_move(travel);
+        }
+        let previewed = self.preview_slide(now);
+        if let Some((at, shift, dim)) = previewed {
+            let preview = self.preview.as_ref().expect("previewed above");
+            let front = preview.front.as_ref().or_else(|| self.layer.as_ref().map(|(_, c)| c));
+            let behind = preview.behind.as_ref().or_else(|| self.lefts.last().map(|(_, c)| c));
+            match (front, behind) {
+                (Some(front), Some(behind)) => out.slide(front, behind, at, shift, dim, self.corners),
+                (Some(front), None) => out.slide(front, front, at, shift, dim, self.corners),
+                (None, _) => {
+                    self.layer = None;
+                    self.paint_page(out, &t, Some((f, info)), &view);
+                }
+            }
+        } else {
         match slide {
             Some((at, shift, dim)) => {
                 // The page shown is drawn on its own canvas, once for as
@@ -4383,6 +4470,7 @@ impl App {
                 self.layer = None;
                 self.paint_page(out, &t, Some((f, info)), &view);
             }
+        }
         }
         self.shown = Some(view);
 
@@ -4476,7 +4564,11 @@ impl App {
                     let k = match self.drawn.iter().position(|(j, _)| *j == i) {
                         Some(k) => k,
                         None => {
-                            let (f, info) = fresh.expect("a page drawn again as it last showed has its rows in view drawn");
+                            // A page drawn as it last showed has the rows in
+                            // view drawn already; one that is not is left as
+                            // the page's colour rather than the recovery
+                            // being taken down for it.
+                            let Some((f, info)) = fresh else { continue };
                             let mut c = self.spare.pop().unwrap_or_else(|| Canvas::new(out.w, 0));
                             c.resize((rows.edges[i + 1] - rows.edges[i]) as u32);
                             let cx = Ctx { t, f, info, state: &self.state, term: self.term.as_ref(), band: None };
@@ -4571,21 +4663,143 @@ impl App {
         let turn = self.turn.as_mut()?;
         let spring = *turn.spring.get_or_insert_with(|| {
             if turn.back {
-                Spring::new(now, -1000.0, 0.0, BACK_PERIOD)
+                Spring::new(now, (turn.last - 1.0) * 1000.0, 0.0, BACK_PERIOD)
             } else {
                 Spring::new(now, 1000.0, -OPEN_SPEED * 1000.0, OPEN_PERIOD)
             }
         });
         let (x, done) = spring.at(now);
         if done {
-            self.backdrop = self.turn.take().map(|t| t.left);
+            let turn = self.turn.take().expect("sliding");
+            self.end_slide(turn);
             return None;
         }
         // Where the page in front stands, in screen widths from the left
         // edge.
         let along = if turn.back { 1.0 + x / 1000.0 } else { x / 1000.0 };
+        turn.last = along;
         let w = self.w as f32;
         Some(((along * w).round() as i32, (BEHIND_SHIFT * w * (1.0 - along)).round() as i32, BEHIND_DIM * (1.0 - along)))
+    }
+
+    /// A slide has come to rest: the page it left is under the page shown,
+    /// or, going back, gone from it.
+    fn end_slide(&mut self, turn: Turn) {
+        if turn.back {
+            self.lefts.pop();
+            self.backdrop = Some(turn.left);
+            return;
+        }
+        // The page left is under the page opened only where it still is:
+        // a page opened over another that was itself put down leaves no
+        // page under it to keep.
+        let under = self.stack.len().checked_sub(2).map(|i| self.stack[i].0);
+        if under != Some(turn.left_screen) {
+            self.backdrop = Some(turn.left);
+            return;
+        }
+        if self.lefts.len() >= KEEP_LEFTS {
+            self.backdrop = Some(self.lefts.remove(0).1);
+        }
+        self.lefts.push((turn.left_screen, turn.left));
+    }
+
+    /// Whether going back stays on the page shown: the file manager climbs
+    /// to the folder it is in, a place to its top, the editor warns of
+    /// changes not saved, and a list open over a page closes first.
+    fn back_stays(&self, now: u64) -> bool {
+        match self.screen() {
+            Screen::Files => self.state.files.up().is_some(),
+            Screen::Choose(place) => self.state.folder(Screen::Choose(place)).up().is_some(),
+            Screen::Editor => {
+                self.state.editor.as_ref().is_some_and(|e| e.changed) && self.unsaved_warned.is_none_or(|at| now >= at + TOAST_MS)
+            }
+            Screen::WlanAdd => self.state.adding.as_ref().is_some_and(|a| a.choosing),
+            _ => false,
+        }
+    }
+
+    /// Begin a swipe in from a screen edge: the page shown is kept as it is,
+    /// and the page under it comes into view as the finger moves.
+    fn begin_preview(&mut self, f: &Fonts, info: &DeviceInfo, now: u64) {
+        // The first page has nothing under it, the search page goes back by
+        // folding into the home page, and a page whose back stays on it has
+        // no page under it to show: none of them shows a preview.
+        if self.stack.len() <= 1 || self.preview.is_some() || self.screen() == Screen::Search || self.back_stays(now) {
+            return;
+        }
+        // Without a page drawn or kept to draw one from there is nothing to
+        // slide: the swipe goes without a preview.
+        if self.layer.is_none() && self.frame.is_none() {
+            return;
+        }
+        let t = self.theme();
+        // What the app keeps is drawn from as it is, not taken: a swipe let
+        // go of leaves both where they were, for the next one.
+        let front = match self.layer {
+            Some(_) => None,
+            None => {
+                let mut canvas = self.preview_front.take().unwrap_or_else(|| Canvas::new(self.w, self.h));
+                if let Some(view) = self.shown {
+                    self.paint_page(&mut canvas, &t, Some((f, info)), &view);
+                }
+                Some(canvas)
+            }
+        };
+        // The page under this one, where the pages kept hold it.
+        let under = self.stack[self.stack.len() - 2].0;
+        let behind = match self.lefts.last() {
+            Some((screen, _)) if *screen == under => None,
+            _ => {
+                let mut canvas = Canvas::new(self.w, self.h);
+                if let Some(fr) = &self.frame {
+                    let bg = fr.bg;
+                    canvas.fill_rect(0.0, 0.0, self.w as f32, self.h as f32, bg);
+                }
+                Some(canvas)
+            }
+        };
+        self.preview = Some(Preview { front, behind, along: 0.0, settle: None });
+        self.dirty = true;
+    }
+
+    /// The finger has come `travel` across from the edge: the page follows
+    /// it, showing that much of the page beneath.
+    fn preview_move(&mut self, travel: f32) {
+        let Some(preview) = self.preview.as_mut() else { return };
+        preview.along = (travel / self.w as f32).clamp(0.0, 1.0);
+        self.dirty = true;
+    }
+
+    /// Where the page a swipe shows stands at `now`: its left edge, how far
+    /// the page under it is shifted, and how dark that one is.
+    fn preview_slide(&mut self, now: u64) -> Option<(i32, i32, f32)> {
+        let (along, done) = {
+            let preview = self.preview.as_ref()?;
+            match &preview.settle {
+                Some(spring) => {
+                    let (x, done) = spring.at(now);
+                    ((x / 1000.0).clamp(0.0, 1.0), done)
+                }
+                None => (preview.along, false),
+            }
+        };
+        if done {
+            self.preview_front = self.preview.take().and_then(|p| p.front);
+            self.dirty = true;
+            return None;
+        }
+        let w = self.w as f32;
+        Some(((along * w).round() as i32, (BEHIND_SHIFT * w * (1.0 - along)).round() as i32, BEHIND_DIM * (1.0 - along)))
+    }
+
+    /// The finger lifted short of going back: the page returns where it was.
+    /// Whether a page was coming back.
+    fn preview_settle(&mut self, now: u64) -> bool {
+        let Some(preview) = self.preview.as_mut() else { return false };
+        preview.settle = Some(Spring::new(now, preview.along * 1000.0, 0.0, BACK_PERIOD));
+        self.dirty = true;
+        true
     }
 
     /// Whether the cursor of the text field on `screen` shows at `now`: it
@@ -4764,8 +4978,15 @@ impl App {
             turn.back = back;
             return;
         }
+        // A page turned back while it was still opening comes back from
+        // where it is, rather than from the edge.
+        let last = match (back, self.turn.as_ref()) {
+            (true, Some(turn)) if !turn.back => turn.last,
+            _ => 0.0,
+        };
         self.end_turn();
         let Some(view) = self.shown.take() else { return };
+        let left_screen = self.screen();
         let mut left = self.backdrop.take().unwrap_or_else(|| Canvas::new(self.w, self.h));
         // The `<` comes up with the finger, before its page goes.
         let view = View { pressing: None, ..view };
@@ -4776,7 +4997,7 @@ impl App {
         if let Some(fr) = self.frame.as_ref().filter(|_| self.cols < self.w) {
             left.fill_rect(self.cols as f32, 0.0, (self.w - self.cols) as f32, self.h as f32, fr.bg);
         }
-        self.turn = Some(Turn { back, left, spring: None });
+        self.turn = Some(Turn { back, left_screen: left_screen, last, left, spring: None });
         self.dirty = true;
     }
 
@@ -6025,7 +6246,6 @@ impl App {
                 self.dirty = true;
             }
             self.drop_button();
-            self.end_turn();
         }
         self.stir(now);
         let t = self.theme();
@@ -6132,6 +6352,7 @@ impl App {
                     self.drag = match at_edge {
                         Some(from_left) if dx.abs() > slop && dx.abs() > dy.abs() => {
                             self.dirty = true;
+                            self.preview_wanted = Some(dx.abs());
                             Drag::Edge { start: x0, from_left, armed: false, x, cy: y0 - m.dp(CUE_LIFT_DP) }
                         }
                         _ if dy.abs() > slop => {
@@ -6161,6 +6382,7 @@ impl App {
                 }
                 Drag::Edge { start, from_left, armed, cy, .. } => {
                     let travel = if from_left { x - start } else { start - x };
+                    self.preview_move(travel);
                     let ready = travel > m.dp(BACK_SWIPE_DP);
                     // A tap of the motor as the `<` appears, as the system
                     // gives.
@@ -6232,9 +6454,24 @@ impl App {
                         _ => self.settle_fold(now),
                     }
                 }
-                Drag::Edge { armed: true, .. } => fx.extend(self.back(now)),
+                Drag::Edge { armed: true, .. } => {
+                    // The page follows the finger out from where it is, on
+                    // the way the page left slides away.
+                    let (frozen, along) = match self.preview.take() {
+                        Some(p) => (p.front.or_else(|| self.layer.take().map(|(_, c)| c)), p.along),
+                        None => (None, 0.0),
+                    };
+                    fx.extend(self.back(now));
+                    if let (Some(front), Some(turn)) = (frozen, self.turn.as_mut()) {
+                        turn.left = front;
+                        turn.last = along;
+                        turn.spring = Some(Spring::new(now, (along - 1.0) * 1000.0, 0.0, BACK_PERIOD));
+                    }
+                }
                 Drag::Edge { start, from_left, x, cy, .. } => {
-                    // Short of going back, the cue sinks back into the edge.
+                    // Short of going back, the page returns where it was and
+                    // the cue sinks back into the edge.
+                    self.preview_settle(now);
                     let travel = if from_left { x - start } else { start - x };
                     let depth = widgets::back_cue_depth(&t, travel);
                     self.cue = Some((from_left, cy, Spring::new(now, depth, 0.0, 0.15)));
@@ -7741,7 +7978,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finger_brings_a_sliding_page_to_rest_and_a_page_never_shown_gives_way_at_once() {
+    fn a_finger_leaves_a_sliding_page_to_finish_and_a_page_never_shown_gives_way_at_once() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         let mut c = Canvas::new(W, H);
@@ -7749,8 +7986,10 @@ mod tests {
         tap_at(&mut app, &f, &i, Action::Open(Screen::Mount), 1000);
         app.compose(&mut c, &f, &i, "12:00", 1000);
         app.touch(Touch::Down(W as f32 / 2.0, H as f32 / 2.0), &f, 1030);
-        assert!(app.turn.is_none(), "a finger brings it to rest");
+        assert!(app.turn.is_some(), "a finger leaves the page sliding in");
         app.touch(Touch::Up, &f, 1060);
+        app.compose(&mut c, &f, &i, "12:00", 3000);
+        assert!(app.turn.is_none(), "and it comes to rest on its own");
 
         // A page rendered anew since it last showed is not drawn as it
         // stands: what replaces it shows at once.
@@ -7758,6 +7997,24 @@ mod tests {
         tap_back(&mut app, &f, &i, 2000);
         assert_eq!(app.screen(), Screen::Home);
         assert!(app.turn.is_none());
+    }
+
+    #[test]
+    fn a_page_turned_back_while_it_opens_comes_back_from_where_it_is() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        tap_at(&mut app, &f, &i, Action::Open(Screen::Mount), 1000);
+        // The slide sets off with its first frame, and the page is part way
+        // in when the finger goes back.
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        app.compose(&mut c, &f, &i, "12:00", 1200);
+        let opened = app.turn.as_ref().expect("sliding in").last;
+        assert!(opened > 0.05 && opened < 0.95, "part way in: {opened}");
+        tap_back(&mut app, &f, &i, 1220);
+        let back = app.turn.as_ref().expect("sliding back");
+        assert!((back.last - opened).abs() < 0.05, "it comes back from {opened}, not from the edge: {}", back.last);
     }
 
     #[test]
@@ -8011,6 +8268,159 @@ mod tests {
         app.touch(Touch::Move(80.0, 1600.0), &f, 0);
         app.touch(Touch::Up, &f, 0);
         assert_eq!(app.screen(), Screen::Reboot);
+    }
+
+    #[test]
+    fn a_swipe_from_the_edge_takes_the_page_with_the_finger() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        let mut out = Canvas::new(W, H);
+        // The page is drawn once, so a swipe has the page to show.
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1605.0), &f, 8);
+        assert!(app.preview_wanted.is_some(), "the swipe asks for its preview");
+        app.compose(&mut out, &f, &i, "12:00", 8);
+        let preview = app.preview.as_ref().expect("the page follows the finger");
+        assert!(preview.along > 0.0 && preview.along < 1.0, "{}", preview.along);
+        app.touch(Touch::Up, &f, 16);
+        assert_eq!(app.screen(), Screen::Reboot, "short of going back, the page stays");
+        assert_eq!(app.deadline(16), Some(0), "the page is coming back");
+        app.tick(1000);
+        assert!(app.preview.is_none(), "the page is back where it was");
+    }
+
+    #[test]
+    fn a_swipe_let_go_of_keeps_the_page_under_it_for_the_next() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut out = Canvas::new(W, H);
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        tap(&mut app, &f, &i, Action::Open(Screen::Reboot));
+        // The page opened slides in over the home page, which is kept once
+        // the slide is done.
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        app.compose(&mut out, &f, &i, "12:00", 1000);
+        assert!(!app.lefts.is_empty(), "the page left is kept");
+        // A swipe let go of short of going back leaves it kept.
+        app.touch(Touch::Down(10.0, 1600.0), &f, 2000);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 2008);
+        app.touch(Touch::Up, &f, 2016);
+        app.tick(3000);
+        assert!(app.preview.is_none(), "the page came back where it was");
+        assert!(!app.lefts.is_empty(), "and the page under it is still kept");
+        // The next swipe shows that page, rather than a colour.
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 4008);
+        app.compose(&mut out, &f, &i, "12:00", 4008);
+        let preview = app.preview.as_ref().expect("the next swipe follows too");
+        assert!(preview.behind.is_none(), "the page kept is shown, not drawn again");
+    }
+
+    #[test]
+    fn a_swipe_three_pages_deep_shows_the_page_under_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        app.open(Screen::Mount);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        app.open(Screen::Settings);
+        app.compose(&mut c, &f, &i, "12:00", 2000);
+        app.compose(&mut c, &f, &i, "12:00", 3000);
+        assert_eq!(app.screen(), Screen::Settings);
+        assert_eq!(app.lefts.len(), 2, "the home page and the one over it are kept");
+        // Three pages deep, the page under this one is the one it opened
+        // from, not a colour.
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 4008);
+        app.compose(&mut c, &f, &i, "12:00", 4008);
+        let preview = app.preview.as_ref().expect("the page follows the finger");
+        assert!(preview.behind.is_none(), "the page kept under this one is shown");
+        assert_eq!(app.lefts.last().map(|(s, _)| *s), Some(Screen::Mount));
+    }
+
+    #[test]
+    fn a_page_changed_while_a_swipe_holds_it_is_drawn_again() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        let mut out = Canvas::new(W, H);
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 8);
+        app.compose(&mut out, &f, &i, "12:00", 8);
+        assert!(app.preview.is_some(), "the page follows the finger");
+        // What the page shows changes under the finger: it is drawn again
+        // rather than the frame it was drawn in being taken for it.
+        app.refresh();
+        app.compose(&mut out, &f, &i, "12:00", 16);
+    }
+
+    #[test]
+    fn the_pages_go_dark_by_the_clock_when_asked() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.state.auto_dark = true;
+        app.set_local_time("20:15");
+        assert!(app.state.dark, "dark from 19:00");
+        app.set_local_time("03:00");
+        assert!(app.state.dark, "dark until 7:00");
+        app.set_local_time("07:00");
+        assert!(!app.state.dark, "light from 7:00");
+        app.set_local_time("18:59");
+        assert!(!app.state.dark, "light until 19:00");
+        // The clock is not followed where it is not asked.
+        app.state.auto_dark = false;
+        app.set_local_time("21:00");
+        assert!(!app.state.dark);
+    }
+
+    #[test]
+    fn the_switch_turns_the_pages_dark_by_the_clock_at_once() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        app.state.local_hour = Some(22);
+        app.frame(&f, &i);
+        let row = app.frame(&f, &i).hits.iter().find(|h| h.action == Action::Toggle(Switch::AutoDark)).expect("the switch is on the settings page").rect;
+        app.touch(Touch::Down(row.x + row.w / 2.0, row.y + row.h / 2.0), &f, 0);
+        app.touch(Touch::Up, &f, 8);
+        assert!(app.state.auto_dark, "the switch is on");
+        assert!(app.state.dark, "and the pages go dark at 22:00");
+    }
+
+    #[test]
+    fn a_swipe_where_back_stays_on_the_page_shows_no_preview() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Advanced, W, H, PPD);
+        tap(&mut app, &f, &i, Action::Open(Screen::Files));
+        app.set_files("/vendor".into(), Ok(vec![entry("init.rc", FileKind::File)]), LISTED);
+        let mut out = Canvas::new(W, H);
+        app.compose(&mut out, &f, &i, "12:00", 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 8);
+        app.compose(&mut out, &f, &i, "12:00", 8);
+        assert!(app.preview.is_none(), "going back climbs to the folder it is in, not to the page under it");
+        assert!(matches!(app.drag, Drag::Edge { .. }), "the cue still shows");
+        app.touch(Touch::Up, &f, 16);
+        // At the root there is a page under it, which the swipe shows.
+        app.set_files("/".into(), Ok(vec![entry("vendor", folder(12))]), LISTED);
+        app.compose(&mut out, &f, &i, "12:00", 32);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 40);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 48);
+        app.compose(&mut out, &f, &i, "12:00", 48);
+        assert!(app.preview.is_some(), "at the root there is a page under it");
+    }
+
+    #[test]
+    fn a_long_swipe_from_the_edge_carries_the_page_out() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Reboot, &f, &i);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(80.0, 1600.0), &f, 8);
+        app.touch(Touch::Move(320.0, 1600.0), &f, 16);
+        app.touch(Touch::Up, &f, 24);
+        assert_eq!(app.screen(), Screen::Home);
+        assert!(app.preview.is_none(), "the page left slides out from where the finger left it");
     }
 
     #[test]
