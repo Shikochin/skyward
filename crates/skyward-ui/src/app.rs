@@ -3401,6 +3401,13 @@ impl App {
         self.refresh();
     }
 
+    /// The data partition is being opened, before the page that would ask
+    /// for its credential shows.
+    pub fn data_opening(&mut self) {
+        self.state.data = Data::Opening;
+        self.refresh();
+    }
+
     /// The data partition did not open, and why.
     pub fn data_failed(&mut self, why: String) {
         self.state.data = Data::Failed(why);

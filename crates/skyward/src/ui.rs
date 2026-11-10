@@ -244,6 +244,38 @@ impl Transfer {
     }
 }
 
+/// Try the credential kept for a user whose files are closed, where the
+/// settings ask for it, and say whether one is being tried: the pages then
+/// keep saying the partition is being opened rather than showing the page
+/// that would ask for it.
+fn kept_credential(app: &mut App, closed: &[Closed], decryptor: &mut Option<Decryptor>, tried: &mut Option<u32>) -> Result<bool> {
+    if !app.state.remember || closed.is_empty() {
+        return Ok(false);
+    }
+    for c in closed.iter().filter(|c| !c.made_up) {
+        match crate::remember::load(c.user) {
+            Ok(Some(credential)) => {
+                let job = decrypt::Job::Unlock { closed: closed.to_vec(), user: c.user, credential };
+                match Decryptor::start(job) {
+                    Ok(started) => {
+                        *decryptor = Some(started);
+                        *tried = Some(c.user);
+                        skyward_sys::kmsg(&format!("the kept screen lock is tried on user {}", c.user))?;
+                        return Ok(true);
+                    }
+                    Err(e) => {
+                        skyward_sys::kmsg(&format!("the kept screen lock is not tried: {e:#}"))?;
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => skyward_sys::kmsg(&format!("the kept screen lock is not read: {e:#}"))?,
+        }
+    }
+    Ok(false)
+}
+
 /// Take internal storage back from file transfer, if it is on, before work
 /// that erases or rewrites the data partition, or installs; whether that
 /// work can start, which the page is told otherwise.
@@ -1161,6 +1193,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // page says whether it came up and how far a computer has the port;
     // why it did not come up goes to the kernel log and on screen.
     let mut fastboot = first == Screen::Fastboot;
+    // The data partition is opened as the pages come up, rather than when
+    // the page that would ask for its credential opens: a phone whose
+    // credential is kept opens without that page ever showing.
+    if !fastboot && skyward_sys::prop("ro.crypto.state").as_deref() == Some("encrypted") {
+        app.data_opening();
+        decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+    }
     let mut port_at = Instant::now();
     // File transfer runs while its switch is on, and offers internal
     // storage while that is open; one that does not start says why on
@@ -2068,28 +2107,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         log_mounted(mounted)?;
                     }
                     closed = opening.closed;
-                    show_closed(&mut app, &closed)?;
                     // A credential the user asked the recovery to keep opens
-                    // the user it was typed for, without asking again.
-                    if app.state.remember {
-                        for c in closed.iter().filter(|c| !c.made_up) {
-                            match crate::remember::load(c.user) {
-                                Ok(Some(credential)) => {
-                                    let job = decrypt::Job::Unlock { closed: closed.clone(), user: c.user, credential };
-                                    match Decryptor::start(job) {
-                                        Ok(started) => {
-                                            decryptor = Some(started);
-                                            tried = Some(c.user);
-                                            skyward_sys::kmsg(&format!("the kept screen lock is tried on user {}", c.user))?;
-                                        }
-                                        Err(e) => skyward_sys::kmsg(&format!("the kept screen lock is not tried: {e:#}"))?,
-                                    }
-                                    break;
-                                }
-                                Ok(None) => {}
-                                Err(e) => skyward_sys::kmsg(&format!("the kept screen lock is not read: {e:#}"))?,
-                            }
-                        }
+                    // the user it was typed for before the page that would
+                    // ask for one shows: the pages keep saying the partition
+                    // is being opened until it is.
+                    if !kept_credential(&mut app, &closed, &mut decryptor, &mut tried)? {
+                        show_closed(&mut app, &closed)?;
                     }
                 }
                 decrypt::Ended::Opened(Err(why)) => {
