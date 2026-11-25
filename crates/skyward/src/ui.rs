@@ -149,6 +149,20 @@ const NORMAL_MAX: [(&str, &str); 3] = [
 /// keeps for strong sunlight and its slider does not reach. The panel the
 /// display driver booted with gives that maximum in the device tree.
 fn normal_max(max: u32) -> Result<u32> {
+    match normal_max_of_panel(max) {
+        Ok(top) => Ok(top),
+        Err(e) => {
+            // A panel whose node gives none, as one of another make's does:
+            // the slider runs to the backlight's own top, which is the whole
+            // light the panel is made for.
+            let top = max.max(1);
+            skyward_sys::kmsg(&format!("the panel gives no normal maximum, so the backlight's own {top} is used: {e:#}"))?;
+            Ok(top)
+        }
+    }
+}
+
+fn normal_max_of_panel(max: u32) -> Result<u32> {
     let param = "/sys/module/msm_drm/parameters/dsi_display0";
     let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
     // The panel's node, then its configuration after a colon, as in
@@ -1470,7 +1484,10 @@ impl<'a> Pages<'a> {
     /// system says it is encrypted: a phone whose credential is kept opens
     /// without the page that would ask for one ever showing.
     fn open_data_at_once(&mut self) -> Result<()> {
-        if self.fastboot || skyward_sys::prop("ro.crypto.state").as_deref() != Some("encrypted") {
+        // A phone that keeps its data partition unencrypted opens it without
+        // the key service, so this asks for the open either way; fastboot
+        // runs without the partitions at all.
+        if self.fastboot {
             return Ok(());
         }
         self.app.data_opening();
