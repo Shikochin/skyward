@@ -1,14 +1,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use skyward_config::DeviceConfig;
-use skyward_sys::prop;
+use skyward_sys::{prop, ToldOnce};
 use skyward_vab::{Slot, SnapshotState};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Mutex;
 
 /// Version of this build, shown on the About page.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,7 +21,10 @@ const SYS_BLOCK: &str = "/sys/class/block";
 /// What the recovery shows about the device. A source that may legitimately
 /// be absent (no battery driver loaded, build properties missing from the
 /// recovery ramdisk) is an `Option`; a source that exists but cannot be read
-/// or parsed is an error.
+/// or parsed is an error. The installed system's partitions are the one
+/// source the recovery has to do without: where their build properties
+/// cannot be read, the details are as where nothing is mounted, and the
+/// log says why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceInfo {
     pub model: String,
@@ -38,6 +42,9 @@ pub struct DeviceInfo {
     /// The locale the installed system is built to start in, such as
     /// `zh-CN`.
     pub locale: Option<String>,
+    /// The time zone the installed system is built to start in, by its
+    /// name in the tz database, such as `Asia/Shanghai`.
+    pub time_zone: Option<String>,
     pub security_patch: Option<PatchLevel>,
     pub kernel: String,
     pub storage: Storage,
@@ -134,6 +141,13 @@ pub struct Boot {
 }
 
 pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
+    collect_with(cfg, battery_now()?)
+}
+
+/// The phone's details with `battery` for the battery, read apart: by one
+/// who reads it oftener than the rest, or who goes on without it where it
+/// cannot be read, as the pages do when they come up.
+pub fn collect_with(cfg: &DeviceConfig, battery: Option<Battery>) -> Result<DeviceInfo> {
     let d = &cfg.display;
     let unlocked = match skyward_block::boot_param("androidboot.vbmeta.device_state")?.as_deref() {
         None => None,
@@ -155,14 +169,57 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         os_version: system.get(&cfg.device.os_version_prop),
         android: system.get("ro.build.version.release"),
         locale: system.get("ro.product.locale"),
+        time_zone: system.get(TIME_ZONE).filter(|zone| !zone.is_empty()),
         security_patch: system.get("ro.build.version.security_patch").map(|s| s.parse()).transpose()?,
         kernel: kernel_release()?,
         storage: storage()?,
-        battery: battery(Path::new(POWER_SUPPLY))?,
+        battery,
         slot: skyward_vab::current_slot()?,
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
     })
+}
+
+/// The property Android keeps its time zone under, by the zone's name in
+/// the tz database: the one a build starts in among its build properties,
+/// and the one set since among the properties init keeps.
+const TIME_ZONE: &str = "persist.sys.timezone";
+
+/// Where init keeps the properties that last from one start to the next,
+/// from the top of the data partition.
+const KEPT_PROPS: &str = "property/persistent_properties";
+
+/// init's `PersistentProperties` from persistent_properties.proto.
+#[derive(Clone, PartialEq, prost::Message)]
+struct KeptProps {
+    #[prost(message, repeated, tag = "1")]
+    properties: Vec<KeptProp>,
+}
+
+/// Its `PersistentPropertyRecord`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct KeptProp {
+    #[prost(string, optional, tag = "1")]
+    name: Option<String>,
+    #[prost(string, optional, tag = "2")]
+    value: Option<String>,
+}
+
+/// The time zone the installed system is set to, by its name in the tz
+/// database, as init keeps it in the data partition mounted at `data`. A
+/// data partition made afresh keeps none until the system has started from
+/// it.
+pub fn kept_time_zone(data: &Path) -> Result<Option<String>> {
+    use prost::Message;
+    let path = data.join(KEPT_PROPS);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let kept = KeptProps::decode(bytes.as_slice()).with_context(|| format!("read {} as init's kept properties", path.display()))?;
+    let zone = kept.properties.into_iter().find(|p| p.name.as_deref() == Some(TIME_ZONE)).and_then(|p| p.value);
+    Ok(zone.filter(|zone| !zone.is_empty()))
 }
 
 /// Build properties of the system the About page describes.
@@ -174,16 +231,27 @@ enum SystemProps {
     Installed(HashMap<String, String>),
 }
 
+/// Why the installed system's properties could last not be read, as the
+/// log was told: the details are collected again and again.
+static PROPS_UNREAD: Mutex<ToldOnce> = Mutex::new(ToldOnce::new());
+
 impl SystemProps {
+    /// A recovery has to come up whatever state the installed system's
+    /// partitions are in, so properties that cannot be read are none, as
+    /// where nothing is mounted, and the log is told why.
     fn current() -> Result<SystemProps> {
         if !skyward_config::ramdisk::in_recovery() {
             return Ok(SystemProps::Running);
         }
-        let props = match skyward_vab::current_slot()? {
-            Some(slot) => installed_props(slot)?,
-            None => HashMap::new(),
+        let read = match skyward_vab::current_slot()? {
+            Some(slot) => installed_props(slot),
+            None => Ok(HashMap::new()),
         };
-        Ok(SystemProps::Installed(props))
+        let why = read.as_ref().err().map(|e| format!("{e:#}"));
+        if PROPS_UNREAD.lock().expect("nothing panics while it is held").untold(why.as_deref()) {
+            skyward_sys::kmsg(&format!("the installed system's properties could not be read, and the phone's details go without them: {}", why.unwrap_or_default()))?;
+        }
+        Ok(SystemProps::Installed(read.unwrap_or_default()))
     }
 
     fn get(&self, name: &str) -> Option<String> {
@@ -321,7 +389,8 @@ fn storage() -> Result<Storage> {
     let dev = fs::canonicalize(&link).with_context(|| format!("resolve {}", link.display()))?;
     let name = dev.file_name().ok_or_else(|| anyhow!("{} has no device name", dev.display()))?;
     let sectors: u64 = parse(&read(Path::new(SYS_BLOCK).join(name).join("size"))?, "block size")?;
-    let free = if is_mountpoint(Path::new("/data"))? { Some(free_bytes("/data")?) } else { None };
+    let data = Path::new("/data");
+    let free = if is_mountpoint(data)? { Some(skyward_block::mount::space(data).context("read the room in /data")?.free) } else { None };
     Ok(Storage { total: sectors * 512, free })
 }
 
@@ -332,18 +401,6 @@ fn is_mountpoint(path: &Path) -> Result<bool> {
     let here = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     let up = fs::metadata(parent).with_context(|| format!("stat {}", parent.display()))?;
     Ok(here.dev() != up.dev())
-}
-
-fn free_bytes(path: &str) -> Result<u64> {
-    let c = CString::new(path)?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| format!("statvfs {path}"));
-    }
-    // `fsblkcnt_t` is 32 bits on some hosts and 64 bits on Android.
-    #[allow(clippy::useless_conversion)]
-    let blocks = u64::from(s.f_bfree);
-    Ok(blocks * s.f_frsize)
 }
 
 /// The battery as it is now.
@@ -435,6 +492,23 @@ mod tests {
         let text = "MemTotal:       15472464 kB\nMemFree:         2381608 kB\n";
         assert_eq!(mem_total(text).unwrap(), 15_472_464);
         assert!(mem_total("MemFree: 1 kB\n").is_err());
+    }
+
+    #[test]
+    fn the_time_zone_the_system_is_set_to_is_read_from_what_init_keeps() {
+        use prost::Message;
+        let record = |name: &str, value: &str| KeptProp { name: Some(name.into()), value: Some(value.into()) };
+        let data = tempfile::tempdir().unwrap();
+        assert_eq!(kept_time_zone(data.path()).unwrap(), None, "a data partition made afresh");
+        let file = data.path().join(KEPT_PROPS);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let kept = KeptProps { properties: vec![record("persist.sys.locale", "tr-TR"), record(TIME_ZONE, "Europe/Istanbul"), record("persist.sys.timezone_confidence", "100")] };
+        fs::write(&file, kept.encode_to_vec()).unwrap();
+        assert_eq!(kept_time_zone(data.path()).unwrap().as_deref(), Some("Europe/Istanbul"));
+        fs::write(&file, KeptProps { properties: vec![record("persist.sys.locale", "tr-TR"), record(TIME_ZONE, "")] }.encode_to_vec()).unwrap();
+        assert_eq!(kept_time_zone(data.path()).unwrap(), None, "a system that has set none");
+        fs::write(&file, [0xff, 0xff, 0xff]).unwrap();
+        assert!(kept_time_zone(data.path()).is_err(), "a file that is not init's");
     }
 
     #[test]

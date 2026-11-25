@@ -19,7 +19,7 @@ pub const FIRST_STAGE: &str = "/lib/modules";
 /// than two characters.
 pub fn canonical(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let name = name.strip_suffix(".ko").unwrap_or(name);
+    let name = name.trim_suffix(".ko");
     if name.len() <= 1 {
         return None;
     }
@@ -37,7 +37,7 @@ pub fn cmdline_options(cmdline: &str) -> Vec<(String, String)> {
     let mut start = 0;
     for (i, b) in cmdline.bytes().enumerate() {
         if b == b'"' {
-            in_quotes = !in_quotes;
+            in_quotes.toggle();
         }
         if in_quotes {
             continue;
@@ -214,10 +214,11 @@ impl Modprobe {
     }
 
     fn block(&mut self, args: &[String]) {
-        if args[0] == "blocklist" && args.len() == 2 {
-            if let Some(module) = canonical(&args[1]) {
-                self.blocklist.insert(module);
-            }
+        if args[0] == "blocklist"
+            && args.len() == 2
+            && let Some(module) = canonical(&args[1])
+        {
+            self.blocklist.insert(module);
         }
     }
 
@@ -347,10 +348,10 @@ impl Modprobe {
     pub fn load_listed(&mut self) -> Vec<(String, anyhow::Error)> {
         let mut failed = Vec::new();
         for name in self.listed.clone() {
-            if let Err(e) = self.load(&name) {
-                if !self.is_blocklisted(&name) {
-                    failed.push((name, e));
-                }
+            if let Err(e) = self.load(&name)
+                && !self.is_blocklisted(&name)
+            {
+                failed.push((name, e));
             }
         }
         failed

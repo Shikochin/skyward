@@ -1,14 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use skyward_config::{ramdisk, DeviceConfig};
+#[cfg(target_os = "android")]
+use skyward_programs::secure::Started;
 use skyward_sys::{bcb, Power};
 use skyward_vab::SnapshotState;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "android")]
 mod backup;
-#[cfg(target_os = "android")]
-mod boot;
 #[cfg(target_os = "android")]
 mod decrypt;
 #[cfg(target_os = "android")]
@@ -17,6 +17,8 @@ mod filework;
 mod haptics;
 #[cfg(target_os = "android")]
 mod input;
+#[cfg(target_os = "android")]
+mod keys;
 #[cfg(target_os = "android")]
 mod merge;
 #[cfg(target_os = "android")]
@@ -28,8 +30,6 @@ mod readings;
 #[cfg(target_os = "android")]
 mod relabel;
 #[cfg(target_os = "android")]
-mod remember;
-#[cfg(target_os = "android")]
 mod secure;
 #[cfg(target_os = "android")]
 mod services;
@@ -38,11 +38,11 @@ mod settings;
 #[cfg(target_os = "android")]
 mod systems;
 #[cfg(target_os = "android")]
-mod torch;
-#[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
 mod updates;
+#[cfg(any(target_os = "android", test))]
+mod waveform;
 #[cfg(target_os = "android")]
 mod wipe;
 #[cfg(target_os = "android")]
@@ -116,13 +116,19 @@ enum Cmd {
     /// merge where it has not begun, and follow it to its end.
     #[cfg(target_os = "android")]
     Merge,
-    /// Keep the configuration's services that this phone runs going until
-    /// stopped.
+    /// Keep the configuration's programs that this phone runs, and those
+    /// its partitions name for its keys, going until stopped.
     #[cfg(target_os = "android")]
     Services {
         #[arg(long, default_value = "/skyward/device.toml")]
         config: String,
     },
+    /// Print what the installed system's partitions say to do to use the
+    /// phone's keys, in order, and do none of it. A build of the hardware
+    /// the phone's init names as the phone starts is named first where it
+    /// has no name yet.
+    #[cfg(target_os = "android")]
+    Keys,
     /// List the display connectors, their modes, CRTCs and planes.
     #[cfg(target_os = "android")]
     Kms {
@@ -157,7 +163,8 @@ enum Cmd {
     },
     /// Set the system clock from the RTC and the offset Android keeps on
     /// persist, as the recovery does when it starts, and print the time in
-    /// China, the first of the time zones the settings offer.
+    /// China, whose zone the clock keeps until the installed system's is
+    /// known or another is chosen.
     #[cfg(target_os = "android")]
     Clock,
     /// Say whether a service has registered with the phone's service
@@ -217,21 +224,7 @@ enum Cmd {
     },
 }
 
-/// A panic is said in the kernel log before it takes the recovery down: the
-/// phone shows the pages again a moment later, and this is the only place
-/// that says why it did not.
-#[cfg(target_os = "android")]
-fn report_panics() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = skyward_sys::kmsg(&format!("skyward panicked: {info}"));
-        previous(info);
-    }));
-}
-
 fn main() -> Result<()> {
-    #[cfg(target_os = "android")]
-    report_panics();
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
@@ -295,13 +288,23 @@ fn main() -> Result<()> {
         Cmd::Umount => skyward_vab::unmount_partitions(booted_slot()?),
         #[cfg(target_os = "android")]
         Cmd::Services { config } => {
-            let props = skyward_info::installed_props(booted_slot()?)?;
-            let mut services = DeviceConfig::load(&config)?.services;
-            services.retain(|s| s.runs_on(&props));
-            services::start(&services, secure::libraries()?.as_deref())?;
+            let slot = booted_slot()?;
+            let props = skyward_info::installed_props(slot)?;
+            let cfg = DeviceConfig::load(&config)?;
+            let services: Vec<Started> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().map(Started::from).collect();
+            let libraries = secure::libraries()?;
+            services::start(&services, libraries.as_deref())?;
+            keys::start(&keys::found(slot, libraries.as_deref())?.steps?, &module_folders(&cfg)?)?;
             loop {
                 std::thread::park();
             }
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Keys => {
+            for line in keys::describe(&keys::found(booted_slot()?, secure::libraries()?.as_deref())?.steps?) {
+                println!("{line}");
+            }
+            Ok(())
         }
         #[cfg(target_os = "android")]
         Cmd::Kms { card } => {
@@ -329,7 +332,8 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Clock => {
             let ms = skyward_sys::clock::set_from_rtc()?;
-            println!("{}", skyward_ui::fmt::datetime(skyward_ui::Lang::En, (ms / 1000) as i64, 0));
+            let china = skyward_ui::app::listed(skyward_ui::app::FIRST_ZONE).context("the first zone is one listed")?;
+            println!("{}", skyward_ui::fmt::datetime(skyward_ui::Lang::En, (ms / 1000) as i64, skyward_ui::fmt::rules(china)));
             Ok(())
         }
         #[cfg(target_os = "android")]
@@ -406,8 +410,13 @@ fn main() -> Result<()> {
         Cmd::Data { credential, close: false } => {
             use skyward_crypto::data;
             let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-            let opening = data::open_without_credential(&service)?;
+            // A partition the phone's table has encrypted in no way opens
+            // with no key service.
+            let service = match data::keyed()? {
+                true => Some(skyward_crypto::keymint::KeyMint::open(&binder)?),
+                false => None,
+            };
+            let opening = data::open_without_credential(service.as_ref())?;
             match &opening.mounted {
                 Some(mounted) => {
                     if let Some(checked) = &mounted.checked {
@@ -420,8 +429,8 @@ fn main() -> Result<()> {
             }
             let mut closed = opening.closed;
             let asked = closed.iter().find(|c| !c.made_up).map(|c| c.user);
-            if let (Some(credential), Some(user)) = (&credential, asked) {
-                closed = data::unlock(&service, &closed, user, credential.as_bytes())?;
+            if let (Some(credential), Some(user), Some(service)) = (&credential, asked, &service) {
+                closed = data::unlock(service, &closed, user, credential.as_bytes())?;
             }
             for c in &closed {
                 match &c.why {
@@ -438,7 +447,15 @@ fn main() -> Result<()> {
         Cmd::Ui { config, font, mono, unlock, dump } => {
             let cfg = DeviceConfig::load(&config)?;
             let start = if unlock { skyward_ui::app::Screen::Decrypt } else { skyward_ui::app::Screen::Home };
-            ui::run(&cfg, &font, &mono, bcb::Request::default(), start, dump.as_deref())
+            // The programs the recovery service started for the phone's
+            // keys are read from the partitions again, as it read them;
+            // where they do not show, it started none.
+            let mut programs = cfg.services.clone();
+            match booted_slot().and_then(|slot| keys::found(slot, secure::libraries()?.as_deref())?.steps) {
+                Ok(steps) => programs.extend(keys::programs(&steps)),
+                Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),
+            }
+            ui::run(&cfg, &programs, &font, &mono, bcb::Request::default(), start, dump.as_deref())
         }
     }
 }
@@ -491,10 +508,15 @@ fn lp(super_dev: &Path, slot: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+/// The folders of the module sources the configuration lists, in the
+/// order a module is looked for in them.
+fn module_folders(cfg: &DeviceConfig) -> Result<Vec<PathBuf>> {
+    cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect()
+}
+
 /// Load `names` from the module sources the configuration lists.
 fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
-    let dirs = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
-    skyward_modules::load(&dirs, names)
+    skyward_modules::load(&module_folders(cfg)?, names)
 }
 
 /// Start the recovery's own logd where it needs libraries of the installed
@@ -505,20 +527,23 @@ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
 /// read from the partitions just mounted: on the 13 Ultra, the touchscreen
 /// driver and the touch processing. Of the programs the configuration
 /// names, only those this phone's build of the hardware runs are started.
+/// The programs that use the phone's keys come after them, as `found`
+/// among the phone's partitions: where what the partitions say could not
+/// be made out, the phone's devices are up before that is said.
 #[cfg(target_os = "android")]
-fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Found>) -> Result<()> {
     let nodes = skyward_sys::ueventd::apply()?;
     skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?;
     let props = skyward_info::installed_props(slot)?;
     adopt_installed_version(&props)?;
     // Without logd the phone's own programs still run, and only what they
     // log is lost, so why it did not start goes to the kernel log.
-    if let Some(logd) = &cfg.logd {
-        if let Err(e) = start_logd(logd) {
-            skyward_sys::kmsg(&format!("logd not started: {e:#}"))?;
-        }
+    if let Some(logd) = &cfg.logd
+        && let Err(e) = start_logd(logd)
+    {
+        skyward_sys::kmsg(&format!("logd not started: {e:#}"))?;
     }
-    let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
+    let services: Vec<Started> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().map(Started::from).collect();
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
     // there to ueventd, which looks in the recovery's firmware folders.
@@ -537,35 +562,69 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let handed = hand_over(&cfg.owners)?;
         skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
     }
-    let hardware: Vec<String> = services.iter().filter_map(|s| s.ready_hardware_service.clone()).collect();
+    // What the phone describes is known wherever its partitions could be
+    // read at all; what they say of its keys may still not be.
+    let (described, found) = match found {
+        Ok(found) => (found.described, found.steps),
+        Err(e) => (Vec::new(), Err(e)),
+    };
+    // What either service directory has to know of, it has to know before
+    // anything registers with it, so both are told of the configuration's
+    // programs and of those that use the phone's keys together.
+    let key_programs = found.as_deref().map(keys::programs).unwrap_or_default();
+    let programs = || services.iter().map(|p| &p.service).chain(&key_programs);
+    let hardware: Vec<String> = programs().filter_map(|s| s.ready_hardware_service.clone()).collect();
     if !hardware.is_empty() {
         secure::prepare_hardware_directory(&hardware)?;
         skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
     }
-    // Only a program that has to register with the service directory needs
-    // the directory to know the phone describes it. The WLAN's supplicant
-    // registers whenever the WLAN is turned on, and the directory can no
-    // longer start again by then: the key service registers with it below,
-    // and nothing would register that again.
-    let mut registering: Vec<String> = services.iter().flat_map(|s| s.ready_service.iter().chain(&s.registers).cloned()).collect();
+    // A program that registers with the service directory needs the
+    // directory to know the phone describes what it registers, and so does
+    // the secure element service where the recovery serves it. The WLAN's
+    // supplicant registers whenever the WLAN is turned on, and the
+    // directory can no longer start again by then: the key service
+    // registers with it below, and nothing would register that again.
+    let mut registering: Vec<String> = programs().flat_map(|s| s.ready_service.iter().chain(&s.registers).cloned()).collect();
+    if found.as_deref().is_ok_and(keys::serves_elements) {
+        registering.push(skyward_omapi::SERVICE.to_string());
+    }
     registering.extend(cfg.wlan.iter().map(|w| w.service.clone()));
-    let files: Vec<String> = services.iter().filter_map(|s| s.description.clone()).collect();
-    if !registering.is_empty() || !files.is_empty() {
-        let described = secure::publish_descriptions(&registering, &files)?;
-        skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
+    // A program may register more than the recovery waits for, as the
+    // WLAN's supplicant registers its maker's own service beside
+    // Android's, and ends where the directory turns one of them away. So
+    // the directory is told of all the phone describes, as the phone's
+    // own is.
+    let mut told = registering.clone();
+    told.extend(described.into_iter().filter(|name| !registering.contains(name)));
+    if !told.is_empty() {
+        secure::publish_descriptions(&told)?;
+        skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
     }
     let libraries = secure::libraries()?;
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
     services::start(&services, libraries.as_deref())?;
+    let steps = found.context("make out from the phone's partitions how its keys are used")?;
+    for line in keys::describe(&steps) {
+        skyward_sys::kmsg(&format!("for the phone's keys: {}", line.replace("\n  ", ", ")))?;
+    }
+    keys::start(&steps, &module_folders(cfg)?)?;
     agree_on_the_notes_key(&registering)
 }
 
+/// How long a file handed over may take to be there once the modules are
+/// loaded: a driver makes its files as it takes its device up, and ueventd
+/// makes the device's node once the kernel has told it of the device,
+/// either of which may come after the load of the module returns.
+#[cfg(target_os = "android")]
+const FILES_MADE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Give each file the phone's own init hands over as it boots to the
 /// account it names, with the mode it gives, as its chown and chmod lines
-/// do. The files are the ones the modules just loaded made, which the
-/// phone's own programs open as those accounts.
+/// do. The files are the ones the modules just loaded make, which the
+/// phone's own programs open as those accounts; one not there yet is
+/// waited for.
 #[cfg(target_os = "android")]
 fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     use skyward_sys::ueventd;
@@ -576,13 +635,7 @@ fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     for run in owners {
         let (uid, gid) = (id(&run.user)?, id(&run.group)?);
         for path in &run.paths {
-            // A node the modules this phone's kernel loaded did not make is
-            // left out: the programs that open it are the ones that matter,
-            // and they are started either way.
-            if !std::path::Path::new(path).exists() {
-                let _ = skyward_sys::kmsg(&format!("{path} is not there to give to {}:{}", run.user, run.group));
-                continue;
-            }
+            skyward_sys::wait_file(Path::new(path), FILES_MADE).context("wait for a file the modules just loaded make")?;
             std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("give {path} to {}:{}", run.user, run.group))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(run.mode))
                 .with_context(|| format!("give {path} the mode {:o}", run.mode))?;
@@ -609,12 +662,7 @@ const LOGD_READY: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(target_os = "android")]
 fn start_logd(logd: &skyward_config::Logd) -> Result<()> {
     for library in &logd.libraries {
-        let from = Path::new(library);
-        let to = Path::new(RECOVERY_LIBRARIES).join(from.file_name().expect("the configuration names each library's file"));
-        let mut part = to.clone().into_os_string();
-        part.push(".part");
-        std::fs::copy(from, &part).with_context(|| format!("copy {library} to {}", Path::new(&part).display()))?;
-        std::fs::rename(&part, &to).with_context(|| format!("put {} in place", to.display()))?;
+        services::place(Path::new(library), Path::new(RECOVERY_LIBRARIES))?;
     }
     skyward_sys::set_prop("ctl.start", "logd")?;
     skyward_sys::wait_prop("logd.ready", "true", LOGD_READY)?;
@@ -693,23 +741,6 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
     Ok(())
 }
 
-/// Let the recovery run what its policy does not allow, where the
-/// configuration asks for it: a recovery carries no framework of the
-/// installed system's, and the policy a recovery image was built with was
-/// built for the phone that image was made on.
-fn set_permissive() -> bool {
-    use std::fs;
-    const ENFORCE: &str = "/sys/fs/selinux/enforce";
-    let already = fs::read_to_string(ENFORCE).is_ok_and(|v| v.trim() == "0");
-    let now = already || (fs::write(ENFORCE, b"0").is_ok() && fs::read_to_string(ENFORCE).is_ok_and(|v| v.trim() == "0"));
-    let _ = skyward_sys::kmsg(&format!(
-        "the recovery runs {}, {}",
-        if now { "permissive" } else { "enforcing" },
-        if now { "as the configuration asks" } else { "and the policy did not give way" }
-    ));
-    now
-}
-
 /// The recovery service. Its own folder is made and its log kept there from
 /// the start, and adb comes up first so a failure later on can be
 /// inspected, file transfer joining it
@@ -727,88 +758,19 @@ fn recovery() -> Result<()> {
         std::fs::set_permissions(skyward_sys::RUN, std::fs::Permissions::from_mode(0o755))
             .with_context(|| format!("open {} to the recovery's other users", skyward_sys::RUN))?;
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
-        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
-        // A policy built for the phone this image was made on need not allow
-        // the programs of another build, which a recovery runs with no
-        // framework of the installed system's to fall back on. Where it gives
-        // way, the port is set up again: what the policy refused is asked for
-        // once more now that it is not refused.
-        let permissive = cfg.device.permissive && set_permissive();
-        // Parts of the phone's own recovery expect a recovery program of the
-        // phone maker's and may restart the phone when it does not answer:
-        // they are frozen before this recovery takes over, which leaves them
-        // running as far as init is concerned.
-        #[cfg(target_os = "android")]
-        for name in &cfg.device.freeze {
-            let at = format!("/system/bin/{name}");
-            let line = match crate::services::running(&at) {
-                Some(pid) => match skyward_sys::freeze(pid) {
-                    Ok(()) => format!("froze {name} (pid {pid}), which expects the phone's own recovery"),
-                    Err(e) => format!("{name} (pid {pid}) did not freeze: {e:#}"),
-                },
-                None => format!("{name} was not running, so nothing was frozen"),
-            };
-            skyward_sys::kmsg(&line)?;
-        }
-        // The phone's own recovery puts its port into host mode, where it
-        // offers a stick a computer would; a port that is to be served by a
-        // computer is put back into device mode first, as the same port is
-        // when the system runs.
-        #[cfg(target_os = "android")]
-        for (file, value) in [
-            ("/sys/class/oplus_chg/usb/otg_switch", "0"),
-            ("/sys/bus/platform/devices/a600000.dwc3/mode", "peripheral"),
-            ("/sys/bus/platform/devices/a600000.ssusb/mode", "peripheral"),
-        ] {
-            if Path::new(file).exists() {
-                match std::fs::write(file, value) {
-                    Ok(()) => skyward_sys::kmsg(&format!("wrote {value} to {file}"))?,
-                    Err(e) => skyward_sys::kmsg(&format!("{file} did not take {value}: {e}"))?,
-                }
-            }
-        }
         // A recovery that ended with a function of its own in the port took
         // the port with it; going through "none" takes that function off.
-        if permissive {
-            if let Err(e) = skyward_sys::usb::switch("adb", std::time::Duration::from_secs(5)) {
-                let _ = skyward_sys::kmsg(&format!("the port did not come back to adb: {e:#}"));
-                skyward_sys::set_prop("sys.usb.config", "adb")?;
-            }
-        } else {
-            if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
-                skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
-            }
-            skyward_sys::set_prop("sys.usb.config", "adb")?;
+        if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
+            skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
         }
-        // The phone's block devices get their names as ueventd walks them,
-        // which can take a moment after the recovery service starts: a run
-        // that started before then ended and was started again.
-        // The port is handed to a computer once more after the phone's own
-        // init has had its say about it. A port bound while the phone still
-        // held it its own way is one no computer sees: the sideload page,
-        // which takes the port through "none" before it asks for its own
-        // function, is seen at once.
-        #[cfg(target_os = "android")]
-        {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if let Err(e) = skyward_sys::usb::switch("adb", std::time::Duration::from_secs(5)) {
-                let _ = skyward_sys::kmsg(&format!("the port did not come back to adb: {e:#}"));
-                skyward_sys::set_prop("sys.usb.config", "adb")?;
-            } else {
-                let _ = skyward_sys::kmsg("the port is handed to a computer as adb again");
-            }
-        }
+        skyward_sys::set_prop("sys.usb.config", "adb")?;
         let misc = bcb::misc();
-        let mut waited = 0;
-        while !misc.exists() && waited < 50 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            waited += 1;
-        }
         let message = bcb::read(&misc)?;
         let request = message.request();
         if !request.work.lasts() {
             bcb::clear(&misc)?;
         }
+        let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
@@ -828,10 +790,11 @@ fn recovery() -> Result<()> {
         // off is taken up again as a retry; one that follows the kernel
         // stopping is not started at all.
         #[cfg(target_os = "android")]
-        if let bcb::Work::Update(update) = &request.work {
-            if update.retry == 0 && !ui::panicked() {
-                bcb::write(&misc, &message.with_retry(1))?;
-            }
+        if let bcb::Work::Update(update) = &request.work
+            && update.retry == 0
+            && !ui::panicked()
+        {
+            bcb::write(&misc, &message.with_retry(1))?;
         }
         // The kernel starts the clock from the RTC, days after 1970 on these
         // phones; the screen and the files written still work without the
@@ -860,20 +823,12 @@ fn recovery() -> Result<()> {
             // partitions the system asks for, as in Android's own recovery:
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
-            // The screen comes up before the phone's partitions do, so that
-            // the wait for them is an animation rather than a dark screen.
-            let booting = crate::boot::start(cfg.display.density);
+            let mut programs = cfg.services.clone();
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
-                prepare(&cfg, booted_slot()?)?;
-                let report = boot_report(&cfg);
-                let _ = std::fs::write("/skyward/run/boot.log", &report);
-                let _ = skyward_sys::kmsg(&format!("boot report of {} lines written", report.lines().count()));
+                programs.extend(prepare(&cfg, booted_slot()?)?);
             }
-            // The pages take the screen from the animation, which lets go of
-            // it first.
-            drop(booting);
             let root = Path::new("/");
-            ui::run(&cfg, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
+            ui::run(&cfg, &programs, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -885,176 +840,13 @@ fn recovery() -> Result<()> {
     })
 }
 
-/// What the recovery service found on the phone before the pages started,
-/// written for the page that shows it: a recovery no computer and no finger
-/// can reach has no other way to say why its parts did not come up.
-#[cfg(target_os = "android")]
-fn boot_report(cfg: &DeviceConfig) -> String {
-    use std::fmt::Write as _;
-    use std::path::Path;
-    let mut out = String::new();
-    let _ = writeln!(out, "skyward {} — boot report", skyward_info::VERSION);
-    let _ = writeln!(out, "device: {} ({})", cfg.device.codename, cfg.device.model);
-    let _ = writeln!(
-        out,
-        "boot: reason={:?} sys={:?} uptime={}s",
-        skyward_sys::prop("ro.boot.bootreason"), skyward_sys::prop("sys.boot.reason"),
-        std::fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split('.').next().and_then(|s| s.parse::<u64>().ok())).unwrap_or(0)
-    );
-    let bcb = skyward_sys::bcb::read(&skyward_sys::bcb::misc()).map(|m| format!("{:?} {:?}", m.command, m.args)).unwrap_or_else(|e| format!("unreadable: {e}"));
-    let _ = writeln!(out, "misc: {bcb}");
-    let phoenix = crate::services::running("/system/bin/phoenix_recovery").map_or_else(|| "no".to_string(), |pid| format!("pid {pid}"));
-    let _ = writeln!(out, "phoenix: {phoenix}  battery={}C", std::fs::read_to_string("/sys/class/power_supply/battery/temp").map(|t| format!("{:.1}", t.trim().parse::<f64>().unwrap_or(0.0) / 10.0)).unwrap_or_default());
-
-    let enforce = std::fs::read_to_string("/sys/fs/selinux/enforce").unwrap_or_default();
-    let _ = writeln!(out, "selinux: enforce={}", enforce.trim());
-    let mounted = |at: &str| skyward_block::mount::is_mount_point(Path::new(at)).unwrap_or(false);
-    let _ = writeln!(
-        out,
-        "mounted: vendor={} odm={} vendor_dlkm={} system_dlkm={} metadata={}",
-        mounted("/vendor"), mounted("/odm"), mounted("/vendor_dlkm"), mounted("/system_dlkm"), mounted("/metadata")
-    );
-    let there = |at: &str| if Path::new(at).exists() { "yes" } else { "NO" };
-    // The touch program is wherever the configuration says it is: the one
-    // the image carries, or the installed system's.
-    let touch = cfg.services.iter().find(|s| s.path.contains("touch")).map_or("/odm/bin/hw/vendor-oplus-hardware-touch-V2-hbp5-service", |s| s.path.as_str());
-    let _ = writeln!(
-        out,
-        "touch: service={} at={} hbp_core={} hbp0={} sockets={}",
-        there(touch), touch, there("/dev/hbp_core"), there("/dev/hbp0"), there("/dev/socket/hidl2touchdaemon_client")
-    );
-    let running = |at: &str| crate::services::running(at).map_or_else(|| "no".to_string(), |pid| format!("pid {pid}"));
-    let _ = writeln!(
-        out,
-        "services: touch={} qseecomd={} keymint={}",
-        running(touch),
-        running("/vendor/bin/qseecomd"),
-        running("/vendor/bin/hw/android.hardware.security.onekeymint-service-qti")
-    );
-    let mut states: Vec<String> = Vec::new();
-    if let Ok(dir) = std::fs::read_dir("/sys/class/udc") {
-        for e in dir.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let state = std::fs::read_to_string(e.path().join("state")).unwrap_or_default();
-            states.push(format!("{name}={}", state.trim()));
-        }
-    }
-    states.sort();
-    let otg = std::fs::read_to_string("/sys/class/oplus_chg/usb/otg_switch").unwrap_or_default();
-    let role = std::fs::read_to_string("/sys/class/typec/port0/role").unwrap_or_default();
-    let _ = writeln!(out, "port: otg_switch={} typec_role={} udc=[{}]", otg.trim(), role.trim(), states.join(","));
-    let state = states.first().and_then(|s| s.rsplit_once('=')).map_or(String::new(), |(_, v)| v.to_string());
-    let _ = writeln!(
-        out,
-        "usb: config={:?} state={:?} adbd={:?} udc={}",
-        skyward_sys::prop("sys.usb.config"), skyward_sys::prop("sys.usb.state"), skyward_sys::prop("init.svc.adbd"), state.trim()
-    );
-    let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
-    let loaded: Vec<&str> = modules.lines().filter(|l| l.contains("hbp") || l.contains("tp_")).map(|l| l.split(' ').next().unwrap_or("")).collect();
-    let _ = writeln!(out, "modules: {}", if loaded.is_empty() { "none of touch".to_string() } else { loaded.join(",") });
-    let has = |name: &str| if modules.lines().any(|l| l.starts_with(name)) { "yes" } else { "NO" };
-    // The gadget init sets up for adb, as far as a recovery can see it: the
-    // host only sees what these say.
-    if let Ok(dir) = std::fs::read_dir("/config/usb_gadget/g1/functions") {
-        let mut functions: Vec<String> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        functions.sort();
-        let at = |name: &str| std::fs::read_to_string(format!("/config/usb_gadget/g1/{name}")).map(|s| s.trim().to_string()).unwrap_or_default();
-        let f1 = std::fs::read_link("/config/usb_gadget/g1/configs/b.1/f1").map_or_else(|_| "none".to_string(), |p| p.display().to_string());
-        let _ = writeln!(
-            out,
-            "gadget: vid={} pid={} udc={} f1={f1} functions=[{}] serial={:?}",
-            at("idVendor"), at("idProduct"), at("UDC"), functions.join(","), skyward_sys::prop("ro.serialno")
-        );
-    }
-    let _ = writeln!(
-        out,
-        "usb gadget: ffs_mounted={} configfs={} usb_f_fs={} libcomposite={} ffs_ready={:?} ep0={}",
-        mounted("/dev/usb-ffs/adb"), there("/config/usb_gadget/g1"), has("usb_f_fs"), has("libcomposite"),
-        skyward_sys::prop("sys.usb.ffs.ready"), there("/dev/usb-ffs/adb/ep0")
-    );
-    let log = std::fs::read_to_string(skyward_sys::LOG).unwrap_or_default();
-    let tail: Vec<&str> = log.lines().rev().filter(|l| {
-        !l.trim_start().starts_with('/')
-            && ["not brought up", "not mounted", "missing", "not started", "failed", "did not", "denied", "has no account"].iter().any(|k| l.contains(k))
-    }).take(8).map(|l| l.trim_start_matches(|c: char| c == '[' || c.is_ascii_digit() || c == '.' || c == ' ' || c == ']')).collect();
-    let _ = writeln!(out, "-- last steps that did not go --");
-    for line in tail.iter().rev() {
-        let _ = writeln!(out, "{line}");
-    }
-    // What the touch program itself said, which is the first thing a recovery
-    // that runs the phone's own program has to go by.
-    let name = Path::new(touch).file_name().map_or_else(|| "touch".to_string(), |n| n.to_string_lossy().into_owned());
-    let said = std::fs::read_to_string(format!("{}/{name}.log", skyward_sys::RUN)).unwrap_or_default();
-    let lines: Vec<&str> = said.lines().rev().take(10).collect();
-    let _ = writeln!(out, "-- {name} said ({} lines) --", said.lines().count());
-    for line in lines.iter().rev() {
-        let cut: String = line.chars().take(100).collect();
-        let _ = writeln!(out, "{cut}");
-    }
-    // The kernel's own record of a start that went wrong, if the phone
-    // keeps one: mounted here, since a recovery's init does not.
-    if !skyward_block::mount::is_mount_point(Path::new("/sys/fs/pstore")).unwrap_or(false) {
-        let _ = std::fs::create_dir_all("/sys/fs/pstore");
-        let _ = skyward_block::mount::mount(Path::new("pstore"), Path::new("/sys/fs/pstore"), "pstore", &[]);
-    }
-    if let Ok(dir) = std::fs::read_dir("/sys/fs/pstore") {
-        let names: Vec<String> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        let _ = writeln!(out, "-- pstore: {} --", if names.is_empty() { "none".to_string() } else { names.join(",") });
-        for name in &names {
-            if let Ok(text) = std::fs::read_to_string(format!("/sys/fs/pstore/{name}")) {
-                let last: Vec<&str> = text.lines().filter(|l| {
-                    ["panic", "watchdog", "reboot", "thermal", "shutdown", "Power", "reset"].iter().any(|k| l.contains(k))
-                }).rev().take(4).collect();
-                for line in last.iter().rev() {
-                    let cut: String = line.chars().take(90).collect();
-                    let _ = writeln!(out, "{cut}");
-                }
-            }
-        }
-    }
-    if let Ok(klog) = skyward_sys::klog() {
-        let hits: Vec<&str> = klog.lines().rev().filter(|l| {
-            ["avc:", "avc_denied", "skyward:", "module", "usb", "hbp", "touch", "keymint", "qseecom", "selinux"].iter().any(|k| l.contains(k))
-        }).take(12).collect();
-        let _ = writeln!(out, "-- kernel log --");
-        for line in hits.iter().rev() {
-            let cut: String = line.chars().take(90).collect();
-            let _ = writeln!(out, "{cut}");
-        }
-    }
-    out
-}
-
-/// Point the loader the recovery's own programs ask for by name at the one
-/// the installed system carries: a recovery image built beside a system
-/// image has its programs ask for the bootstrap loader, and a recovery
-/// ramdisk need not carry one. Without it, the filesystem checks the
-/// recovery ships cannot run at all.
-#[cfg(target_os = "android")]
-fn prepare_early_loader() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    const LOADER: &str = "/system/bin/bootstrap/linker64";
-    let at = Path::new(LOADER);
-    if at.exists() {
-        return Ok(());
-    }
-    let dir = at.parent().expect("the loader is in a folder");
-    std::fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).with_context(|| format!("open {} to every user", dir.display()))?;
-    let from = ["/mnt/system/system/bin/bootstrap/linker64", "/mnt/system/system/bin/linker64"]
-        .into_iter()
-        .map(Path::new)
-        .find(|p| p.is_file())
-        .with_context(|| format!("the installed system carries no loader for {LOADER}"))?;
-    std::os::unix::fs::symlink(from, at).with_context(|| format!("point {} at {}", at.display(), from.display()))?;
-    skyward_sys::kmsg(&format!("{} is the installed system's {}", at.display(), from.display()))
-}
-
 /// Map and mount the slot's partitions from super, then bring up what runs
-/// from them. Recovery has to stay usable when super cannot be mounted, as
-/// after it is wiped, so the reason goes to the kernel log instead.
+/// from them, and give the programs the partitions name for the phone's
+/// keys, which the recovery keeps running from then on. Recovery has to
+/// stay usable when super cannot be mounted, as after it is wiped, so the
+/// reason goes to the kernel log instead.
 #[cfg(target_os = "android")]
-fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
+fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_config::Service>> {
     match skyward_vab::mount_partitions(slot) {
         Ok(mounts) => {
             for d in &mounts.damaged {
@@ -1063,20 +855,21 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
             }
-            // The filesystem checks the recovery ships ask for a loader the
-            // ramdisk need not carry; the installed system has it.
-            if let Err(e) = prepare_early_loader() {
-                skyward_sys::kmsg(&format!("the loader the recovery's own programs ask for is not there: {e:#}"))?;
-            }
+            let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
+            let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());
+            let programs = steps.map(keys::programs).unwrap_or_default();
             // Without them the screen still shows and the keys still work,
             // so this reason goes to the kernel log as well.
-            if let Err(e) = bring_up(cfg, slot) {
+            if let Err(e) = bring_up(cfg, slot, found) {
                 skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
             }
+            Ok(programs)
         }
-        Err(e) => skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("partitions not mounted: {e:#}"))?;
+            Ok(Vec::new())
+        }
     }
-    Ok(())
 }
 
 fn info(config: &str) -> Result<()> {
@@ -1128,7 +921,19 @@ fn identify(path: &Path) -> Result<()> {
                 println!("all user data is erased once it is in, after the user agrees");
             }
         }
-        Package::Image(kind) => println!("{kind:?}, for {}", kind.partitions().join(" or ")),
+        Package::Image(image) => {
+            let how = if image.layout.sparse { ", in the sparse format" } else { "" };
+            println!("an image of {:?}, {} bytes in its partition{how}", image.kind, image.layout.size);
+            #[cfg(target_os = "android")]
+            {
+                use skyward_install::image::{named, targets};
+                let name = path.file_name().and_then(|name| name.to_str()).map(named);
+                let logical = skyward_vab::slot_names(booted_slot()?)?;
+                for target in targets(image.kind, name, Path::new(skyward_block::BY_NAME), &logical)? {
+                    println!("for {}, {:?}", target.name, target.place);
+                }
+            }
+        }
         Package::Script => println!("a zip that installs itself with a script"),
         Package::System(c) => {
             println!("the system {} {} ({}), to install beside the installed one", c.manifest.name, c.manifest.version, c.manifest.id);

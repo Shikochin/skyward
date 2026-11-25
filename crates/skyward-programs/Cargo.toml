@@ -1,0 +1,25 @@
+[package]
+name = "skyward-programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# Reads the libraries a program of the phone's asks its loader for.
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+# The descriptions of the services a phone's own programs register are XML.
+roxmltree = "0.21.2"
+skyward-config = { path = "../skyward-config" }
+# The name of the secure element service a phone's weaver may go through,
+# which the recovery serves.
+skyward-omapi = { path = "../skyward-omapi" }
+
+[dev-dependencies]
+# Looks the accounts the programs run as up as the recovery does on the
+# phone, in the phone's own lists of them.
+skyward-sys = { path = "../skyward-sys" }
+tempfile = "3.27.0"

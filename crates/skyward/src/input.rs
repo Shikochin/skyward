@@ -35,15 +35,7 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-const KEYS: [KeyCode; 5] = [
-    KeyCode::KEY_POWER,
-    KeyCode::KEY_VOLUMEUP,
-    KeyCode::KEY_VOLUMEDOWN,
-    KeyCode::KEY_BACK,
-    // The side button, which the driver reports as a trigger-happy button
-    // of its own: a device with only that key is taken in for it.
-    KeyCode::BTN_TRIGGER_HAPPY32,
-];
+const KEYS: [KeyCode; 4] = [KeyCode::KEY_POWER, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_BACK];
 
 fn key_of(code: KeyCode) -> Option<Key> {
     match code {
@@ -51,10 +43,6 @@ fn key_of(code: KeyCode) -> Option<Key> {
         KeyCode::KEY_VOLUMEUP => Some(Key::VolumeUp),
         KeyCode::KEY_VOLUMEDOWN => Some(Key::VolumeDown),
         KeyCode::KEY_BACK => Some(Key::Back),
-        // The side button of the phone, which its own system gives to the
-        // camera or the torch: the driver reports it as a trigger-happy
-        // button of its own.
-        KeyCode::BTN_TRIGGER_HAPPY32 => Some(Key::Side),
         _ => None,
     }
 }
@@ -351,10 +339,10 @@ impl Inputs {
                     // The kernel's own repeats of a key held are left out;
                     // the UI times its own.
                     for e in events {
-                        if let EventSummary::Key(_, code, value @ (0 | 1)) = e.destructure() {
-                            if let Some(k) = key_of(code) {
-                                out.push(Event::Key(k, value == 1));
-                            }
+                        if let EventSummary::Key(_, code, value @ (0 | 1)) = e.destructure()
+                            && let Some(k) = key_of(code)
+                        {
+                            out.push(Event::Key(k, value == 1));
                         }
                     }
                 }
