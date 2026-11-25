@@ -16,6 +16,14 @@ pub struct State {
     /// How long the screen stays on with nothing touched, by its place in
     /// [`SCREEN_OFF`].
     pub screen_off: usize,
+    /// The panel shows the time and the battery while the pages sleep, as
+    /// the phone's own system does: the always-on screen.
+    pub aod: bool,
+    /// The screen lock the recovery was given is kept, to open the data
+    /// partition with it at the next start.
+    pub remember: bool,
+    /// The torch is on, as the pages last asked for it.
+    pub torch: bool,
     /// The clock and the times on the pages keep the time zone the
     /// installed system is set to, where that is known.
     pub follow_system_zone: bool,
@@ -204,6 +212,9 @@ impl Default for State {
             brightness: SLIDER_START,
             // Two minutes.
             screen_off: 3,
+            aod: false,
+            remember: false,
+            torch: false,
             follow_system_zone: true,
             time_zone: listed(FIRST_ZONE).expect("the first zone is one listed"),
             system_zone: None,

@@ -616,6 +616,8 @@ both_slots = "La nouvelle version est écrite dans la partition recovery du slot
 reboot_to_use = "Une fois la mise à jour terminée, redémarrez en recovery pour utiliser la nouvelle version."
 
 [settings]
+always_on = "Écran toujours allumé"
+remember_password = "Mémoriser le mot de passe de déchiffrement"
 light_mode = "Mode clair"
 dark_mode = "Mode sombre"
 brightness = "Luminosité"
@@ -1385,3 +1387,12 @@ none = "Rien à installer ici"
 no_usb_drive = "Aucune clé USB"
 connect_usb_drive = "Connectez une clé USB via OTG pour voir ses fichiers ici."
 usb_drive_format = "Utilisez une clé USB formatée en FAT32 ou exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Touchez pour allumer"
+
+# The torch the side button lights.
+[torch]
+on = "La lampe est allumée"
+off = "La lampe est éteinte"

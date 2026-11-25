@@ -606,6 +606,8 @@ both_slots = "新版本將寫入下次啟動所用槽位的 recovery 分割區�
 reboot_to_use = "更新完成後，重新啟動到復原模式即可使用新版本。"
 
 [settings]
+always_on = "息屏顯示"
+remember_password = "記住解密密碼"
 light_mode = "淺色模式"
 dark_mode = "深色模式"
 brightness = "亮度"
@@ -1371,3 +1373,12 @@ none = "沒有可安裝的檔案"
 no_usb_drive = "未連接 USB 隨身碟"
 connect_usb_drive = "透過 OTG 連接 USB 隨身碟後，將在此顯示其中的檔案。"
 usb_drive_format = "請使用 FAT32 或 exFAT 格式的 USB 隨身碟。{why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "輕觸亮屏"
+
+# The torch the side button lights.
+[torch]
+on = "手電筒已打開"
+off = "手電筒已關閉"

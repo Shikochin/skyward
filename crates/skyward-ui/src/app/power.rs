@@ -13,6 +13,11 @@ impl App {
     /// is told to go off.
     pub fn panel(&self, now: u64) -> Option<f32> {
         if !self.display_on {
+            // The always-on screen keeps the panel lit, dim, while the pages
+            // sleep.
+            if self.state.aod {
+                return Some(AOD_LEVEL);
+            }
             return self.darkening.filter(|_| self.curtain.level(now) > 0.0);
         }
         let (full, level) = (self.state.brightness, self.bright.level(now));
@@ -94,7 +99,9 @@ impl App {
     /// now, then the panel goes off. A finger on the glass lets go of what
     /// it held, and the page stops where it is.
     pub(super) fn sleep(&mut self, now: u64) {
-        self.darkening = self.panel(now);
+        // With an always-on screen the panel does not go dark: it shows the
+        // time at the dim light it is lit with.
+        self.darkening = if self.state.aod { None } else { self.panel(now) };
         self.curtain.set(false, now);
         self.display_on = false;
         self.bright = full_brightness();
@@ -120,6 +127,20 @@ impl App {
         self.row_press = None;
         self.row_art = None;
         self.end_turn();
+    }
+
+    /// The torch was lit, or put out: the pages say which.
+    pub fn torch(&mut self, on: bool, now: u64) {
+        self.state.torch = on;
+        let text = if on { texts::torch::ON } else { texts::torch::OFF };
+        self.say(self.state.lang.pick(text), now);
+    }
+
+    /// Whether the panel shows the time while the pages sleep, as the
+    /// phone's own system does.
+    pub fn set_aod(&mut self, on: bool) {
+        self.state.aod = on;
+        self.dirty = true;
     }
 
     /// A page sliding over another comes to rest at once.

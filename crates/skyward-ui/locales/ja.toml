@@ -606,6 +606,8 @@ both_slots = "新しいバージョンは、次回起動するスロットの re
 reboot_to_use = "アップデート後、リカバリモードへ再起動すると新しいバージョンを使用できます。"
 
 [settings]
+always_on = "常時表示"
+remember_password = "復号パスワードを保存"
 light_mode = "ライトモード"
 dark_mode = "ダークモード"
 brightness = "明るさ"
@@ -1371,3 +1373,12 @@ none = "インストールできるファイルなし"
 no_usb_drive = "USB ドライブなし"
 connect_usb_drive = "OTG で USB ドライブを接続すると、ここにファイルが表示されます。"
 usb_drive_format = "FAT32 または exFAT でフォーマットした USB ドライブを使用してください。{why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "タップで点灯"
+
+# The torch the side button lights.
+[torch]
+on = "ライトは点灯しています"
+off = "ライトは消灯しています"

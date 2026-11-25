@@ -621,6 +621,8 @@ both_slots = "Новая версия записывается в раздел r
 reboot_to_use = "После обновления перезагрузитесь в рекавери, чтобы использовать новую версию."
 
 [settings]
+always_on = "Экран всегда включён"
+remember_password = "Запомнить пароль расшифровки"
 light_mode = "Светлый режим"
 dark_mode = "Тёмный режим"
 brightness = "Яркость"
@@ -1392,3 +1394,12 @@ none = "Здесь нечего устанавливать"
 no_usb_drive = "Нет USB-накопителя"
 connect_usb_drive = "Подключите USB-накопитель через OTG, чтобы увидеть здесь его файлы."
 usb_drive_format = "Используйте USB-накопитель, отформатированный в FAT32 или exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Коснитесь, чтобы включить"
+
+# The torch the side button lights.
+[torch]
+on = "Фонарик включён"
+off = "Фонарик выключен"

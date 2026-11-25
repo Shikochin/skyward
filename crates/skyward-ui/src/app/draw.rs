@@ -165,6 +165,11 @@ impl App {
     /// while a cable has just gone in, both as dark as the content stands
     /// as the panel goes off or comes up.
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+        // The always-on screen takes the panel while the pages sleep.
+        if !self.display_on && self.state.aod {
+            self.compose_aod(out, f, info, clock);
+            return;
+        }
         let charge = self.charging.as_ref().map_or(0.0, |c| c.shown.level(now));
         if charge < 1.0 {
             self.compose_page(out, f, info, clock, now);
@@ -173,6 +178,31 @@ impl App {
             self.compose_charging(out, f, info, charge, now);
         }
         out.dim(self.curtain.level(now));
+    }
+
+    /// The always-on screen: the time, the battery, and what a finger does
+    /// to it, on black while the pages sleep and the panel is lit low.
+    fn compose_aod(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str) {
+        let t = self.theme();
+        let (w, h) = (out.w as f32, out.h as f32);
+        out.clear(Rgba::rgb(0, 0, 0));
+        let ink = Rgba::rgb(0xd6, 0xd8, 0xde);
+        let dim = Rgba::rgb(0x78, 0x7c, 0x86);
+        // The time, large, above the middle.
+        let px = t.m.dp(78.0);
+        let width = Canvas::new(0, 0).text_width(&f.display, clock, px);
+        out.text(&f.display, clock, (w - width) / 2.0, h * 0.34, px, ink, None);
+        // The battery under it.
+        let level = info.battery.as_ref().map_or(0, |b| b.level);
+        let said = format!("{level}%");
+        let px = t.m.dp(18.0);
+        let width = Canvas::new(0, 0).text_width(&f.body, &said, px);
+        out.text(&f.body, &said, (w - width) / 2.0, h * 0.34 + t.m.dp(86.0), px, dim, None);
+        // What a finger does to it.
+        let hint = self.state.lang.pick(texts::always_on::HINT);
+        let px = t.m.dp(15.0);
+        let width = Canvas::new(0, 0).text_width(&f.body, hint, px);
+        out.text(&f.body, hint, (w - width) / 2.0, h * 0.84, px, dim, None);
     }
 
     /// The charging screen, `level` of the way over the page drawn on `out`.

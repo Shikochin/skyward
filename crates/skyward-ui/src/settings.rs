@@ -58,6 +58,13 @@ pub struct Settings {
     pub install: Install,
     pub backup: Backup,
     pub logs: Logs,
+    /// The panel shows the time while the pages sleep; none while the
+    /// phone's own configuration has yet to be overridden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aod: Option<bool>,
+    /// The screen lock the recovery was given is kept, to open the data
+    /// partition with it at the next start.
+    pub remember: bool,
 }
 
 /// The install page's options.
@@ -129,6 +136,8 @@ impl Settings {
             brightness: state.brightness,
             screen_off: SCREEN_OFF[state.screen_off].map_or(0, |ms| ms / 1000),
             follow_system_time_zone: state.follow_system_zone,
+            aod: Some(state.aod),
+            remember: state.remember,
             time_zone: TIME_ZONES[state.time_zone].tz.to_string(),
             system_time_zone: state.system_zone.as_ref().map(|zone| zone.name.clone()),
             vibrate: state.vibrate,
@@ -185,6 +194,10 @@ impl Settings {
             state.screen_off = at;
         }
         state.follow_system_zone = self.follow_system_time_zone;
+        if let Some(on) = self.aod {
+            state.aod = on;
+        }
+        state.remember = self.remember;
         if let Some(at) = TIME_ZONES.iter().position(|zone| zone.tz == self.time_zone) {
             state.time_zone = at;
         }

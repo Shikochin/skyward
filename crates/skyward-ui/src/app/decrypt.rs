@@ -60,6 +60,13 @@ impl App {
     /// The data partition is open: every user's own files with it, or
     /// those of `waiting`, the user and the control their screen lock is
     /// answered with, still closed.
+    /// The data partition is being opened, before the page that would ask
+    /// for its credential shows.
+    pub fn data_opening(&mut self) {
+        self.state.data = Data::Opening;
+        self.refresh();
+    }
+
     pub fn data_waiting(&mut self, waiting: Option<(u32, Keys)>) {
         self.state.data = match waiting {
             Some((user, keys)) => Data::Locked { user, keys, checking: false },

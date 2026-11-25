@@ -611,6 +611,8 @@ both_slots = "Phiên bản mới được ghi vào phân vùng recovery của kh
 reboot_to_use = "Sau khi cập nhật, hãy khởi động lại vào recovery để dùng phiên bản mới."
 
 [settings]
+always_on = "Màn hình luôn bật"
+remember_password = "Ghi nhớ mật khẩu giải mã"
 light_mode = "Chế độ sáng"
 dark_mode = "Chế độ tối"
 brightness = "Độ sáng"
@@ -1378,3 +1380,12 @@ none = "Không có gì để cài ở đây"
 no_usb_drive = "Không có ổ USB"
 connect_usb_drive = "Kết nối ổ USB qua OTG để xem các tệp của nó tại đây."
 usb_drive_format = "Hãy dùng ổ USB định dạng FAT32 hoặc exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Chạm để bật"
+
+# The torch the side button lights.
+[torch]
+on = "Đèn pin đang bật"
+off = "Đèn pin đang tắt"

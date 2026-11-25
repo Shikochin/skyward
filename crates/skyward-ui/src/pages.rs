@@ -353,8 +353,18 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(texts::page::LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(texts::page::TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(s.zone_name())),
+        Row::new(l.pick(texts::settings::ALWAYS_ON)).icon(SLATE, Icon::Clock).trail(Trail::Switch(s.aod)),
+        Row::new(l.pick(texts::settings::REMEMBER_PASSWORD)).icon(SLATE, Icon::Lock).trail(Trail::Switch(s.remember)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    out.extend(hits(
+        &general.rows,
+        &[
+            Action::Open(Screen::Language),
+            Action::Open(Screen::TimeZone),
+            Action::Toggle(Switch::Aod),
+            Action::Toggle(Switch::Remember),
+        ],
+    ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(texts::settings::FILE_TRANSFER)).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));

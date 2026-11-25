@@ -616,6 +616,8 @@ both_slots = "La nuova versione viene scritta nella partizione recovery dello sl
 reboot_to_use = "Dopo l'aggiornamento, riavvia in recovery per usare la nuova versione."
 
 [settings]
+always_on = "Schermo sempre attivo"
+remember_password = "Ricorda la password di decifratura"
 light_mode = "Modalità chiara"
 dark_mode = "Modalità scura"
 brightness = "Luminosità"
@@ -1385,3 +1387,12 @@ none = "Qui non c'è nulla da installare"
 no_usb_drive = "Nessuna unità USB"
 connect_usb_drive = "Collega un'unità USB tramite OTG per vederne qui i file."
 usb_drive_format = "Usa un'unità USB formattata in FAT32 o exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Tocca per accendere"
+
+# The torch the side button lights.
+[torch]
+on = "La torcia è accesa"
+off = "La torcia è spenta"

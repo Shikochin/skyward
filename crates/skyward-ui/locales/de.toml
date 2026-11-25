@@ -611,6 +611,8 @@ both_slots = "Die neue Version kommt in die recovery-Partition des Slots, der al
 reboot_to_use = "Starte nach dem Update ins Recovery neu, um die neue Version zu nutzen."
 
 [settings]
+always_on = "Immer eingeschaltet"
+remember_password = "Entschlüsselungspasswort merken"
 light_mode = "Heller Modus"
 dark_mode = "Dunkler Modus"
 brightness = "Helligkeit"
@@ -1378,3 +1380,12 @@ none = "Hier gibt es nichts zu installieren"
 no_usb_drive = "Kein USB-Stick"
 connect_usb_drive = "Schließe einen USB-Stick über OTG an, um seine Dateien hier zu sehen."
 usb_drive_format = "Nutze einen USB-Stick, der mit FAT32 oder exFAT formatiert ist. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Zum Einschalten tippen"
+
+# The torch the side button lights.
+[torch]
+on = "Die Taschenlampe ist an"
+off = "Die Taschenlampe ist aus"

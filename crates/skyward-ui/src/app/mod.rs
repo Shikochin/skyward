@@ -404,6 +404,9 @@ pub enum Key {
     VolumeUp,
     VolumeDown,
     Back,
+    /// The side button of the phone, which its own system gives to the
+    /// camera or the torch.
+    Side,
 }
 
 /// Where a screenshot went.
@@ -433,6 +436,10 @@ pub enum Effect {
     Screenshot { storage: bool },
     /// Offer internal storage to a computer over USB, or stop.
     FileTransfer(bool),
+    /// Keep the screen lock the recovery was given, or forget the one kept.
+    Remember(bool),
+    /// Light the torch, or put it out.
+    Torch,
     /// Start receiving a package over USB.
     Sideload,
     /// Start installing the file at this path from the top of a place,
@@ -753,6 +760,17 @@ const BACKLIGHT_STEP_MS: u64 = 8;
 /// second tap of a wake habit, or the hand reaching for a phone whose
 /// screen an install just lit, should not act. Android's double-tap window.
 const WAKE_GUARD_MS: u64 = 400;
+/// The backlight the always-on screen is lit with, as a share of the
+/// brightness at the slider's top: dim enough to read in the dark and to
+/// leave the room dark around it.
+const AOD_LEVEL: f32 = 0.20;
+/// How often the always-on screen draws itself again: it shows the time to
+/// the minute, and a frame more often than that keeps it right.
+const AOD_TICK_MS: u64 = 20_000;
+/// How quickly two taps on a dark panel have to come, and how near each
+/// other, to wake it.
+const DOUBLE_TAP_MS: u64 = 400;
+const DOUBLE_TAP_SLOP: f32 = 120.0;
 /// A volume key held this long moves the light again, then once every
 /// [`REPEAT_MS`], as the system repeats a key held.
 const REPEAT_DELAY_MS: u64 = 400;
@@ -1152,6 +1170,9 @@ pub struct App {
     /// off, under the backlight held then, and comes up as the panel lights.
     curtain: Fade,
     darkening: Option<f32>,
+    /// The last tap on the dark panel, where and when, for the second of a
+    /// double tap to be told from the first.
+    last_tap: Option<(u64, f32, f32)>,
     /// The charging screen, from when a cable goes in until it has gone,
     /// with the level and what the charger does drawn for it, and the
     /// screen it is drawn on while it comes or goes over the page.
@@ -1243,6 +1264,7 @@ impl App {
             bright: full_brightness(),
             curtain: Fade::shown(BRIGHTEN, DARKEN),
             darkening: None,
+            last_tap: None,
             charging: None,
             charge_art: None,
             charge_canvas: None,
@@ -1302,6 +1324,11 @@ impl App {
     /// backlight eases, else when a shown message should disappear or the
     /// panel should dim or go off.
     pub fn deadline(&self, now: u64) -> Option<u64> {
+        // The always-on screen draws itself again to keep the time it shows
+        // to the minute.
+        if !self.display_on && self.state.aod {
+            return Some(now + AOD_TICK_MS);
+        }
         let sliding = matches!(self.button, Some((_, Press::Slide { .. }))) && self.state.confirm < 1.0;
         let moving = self.display_on
             && (self.fling.is_some()

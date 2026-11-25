@@ -33,6 +33,11 @@ pub enum Switch {
     ShowPassword,
     /// Keep the time zone the installed system is set to.
     SystemTimeZone,
+    /// Show the time and the battery while the pages sleep.
+    Aod,
+    /// Keep the screen lock the recovery was given, to open the data
+    /// partition with it at the next start.
+    Remember,
 }
 
 /// How long the screen stays on with nothing touched, in milliseconds, in

@@ -68,6 +68,8 @@ impl App {
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::Aod => &mut self.state.aod,
+                    Switch::Remember => &mut self.state.remember,
                     Switch::Wlan | Switch::SystemTimeZone => unreachable!("the switch is turned above"),
                 };
                 *on = !*on;
@@ -75,6 +77,9 @@ impl App {
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
+                }
+                if switch == Switch::Remember {
+                    return vec![Effect::Remember(now_on)];
                 }
             }
             Action::MountToggle(i) => {

@@ -38,6 +38,12 @@ mod settings;
 #[cfg(target_os = "android")]
 mod systems;
 #[cfg(target_os = "android")]
+mod boot;
+#[cfg(target_os = "android")]
+mod remember;
+#[cfg(target_os = "android")]
+mod torch;
+#[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
 mod updates;
@@ -224,7 +230,21 @@ enum Cmd {
     },
 }
 
+/// A panic is said in the kernel log before it takes the recovery down: the
+/// phone shows the pages again a moment later, and this is the only place
+/// that says why it did not.
+#[cfg(target_os = "android")]
+fn report_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = skyward_sys::kmsg(&format!("skyward panicked: {info}"));
+        previous(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    #[cfg(target_os = "android")]
+    report_panics();
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
@@ -824,9 +844,14 @@ fn recovery() -> Result<()> {
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
             let mut programs = cfg.services.clone();
+            // The screen comes up before the phone's partitions do, so that
+            // the wait for them is the animation of the start rather than a
+            // dark screen; it goes when the pages take the screen.
+            let booting = boot::start(cfg.display.density);
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 programs.extend(prepare(&cfg, booted_slot()?)?);
             }
+            drop(booting);
             let root = Path::new("/");
             ui::run(&cfg, &programs, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
         }
@@ -842,6 +867,31 @@ fn recovery() -> Result<()> {
 
 /// Map and mount the slot's partitions from super, then bring up what runs
 /// from them, and give the programs the partitions name for the phone's
+/// Point the loader the recovery's own programs ask for by name at the one
+/// the installed system carries: a recovery image built beside a system
+/// image has its programs ask for the bootstrap loader, and a recovery
+/// ramdisk need not carry one. Without it, the filesystem checks the
+/// recovery ships cannot run at all.
+#[cfg(target_os = "android")]
+fn prepare_early_loader() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const LOADER: &str = "/system/bin/bootstrap/linker64";
+    let at = Path::new(LOADER);
+    if at.exists() {
+        return Ok(());
+    }
+    let dir = at.parent().expect("the loader is in a folder");
+    std::fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).with_context(|| format!("open {} to every user", dir.display()))?;
+    let from = ["/mnt/system/system/bin/bootstrap/linker64", "/mnt/system/system/bin/linker64"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file())
+        .with_context(|| format!("the installed system carries no loader for {LOADER}"))?;
+    std::os::unix::fs::symlink(from, at).with_context(|| format!("point {} at {}", at.display(), from.display()))?;
+    skyward_sys::kmsg(&format!("{} is the installed system's {}", at.display(), from.display()))
+}
+
 /// keys, which the recovery keeps running from then on. Recovery has to
 /// stay usable when super cannot be mounted, as after it is wiped, so the
 /// reason goes to the kernel log instead.
@@ -854,6 +904,11 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
             }
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
+            }
+            // The filesystem checks the recovery ships ask for a loader the
+            // ramdisk need not carry; the installed system has it.
+            if let Err(e) = prepare_early_loader() {
+                skyward_sys::kmsg(&format!("the loader the recovery's own programs ask for is not there: {e:#}"))?;
             }
             let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
             let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());

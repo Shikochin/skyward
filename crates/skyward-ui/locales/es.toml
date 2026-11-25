@@ -616,6 +616,8 @@ both_slots = "La nueva versión se escribe en la partición recovery de la ranur
 reboot_to_use = "Después de actualizar, reinicia en recovery para usar la nueva versión."
 
 [settings]
+always_on = "Pantalla siempre activa"
+remember_password = "Recordar la contraseña de descifrado"
 light_mode = "Modo claro"
 dark_mode = "Modo oscuro"
 brightness = "Brillo"
@@ -1385,3 +1387,12 @@ none = "Aquí no hay nada que instalar"
 no_usb_drive = "Sin unidad USB"
 connect_usb_drive = "Conecta una unidad USB por OTG para ver aquí sus archivos."
 usb_drive_format = "Usa una unidad USB con formato FAT32 o exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Toca para activar"
+
+# The torch the side button lights.
+[torch]
+on = "La linterna está encendida"
+off = "La linterna está apagada"

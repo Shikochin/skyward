@@ -606,6 +606,8 @@ both_slots = "新版本将写入下次启动所用槽位的 recovery 分区；�
 reboot_to_use = "更新完成后，重启到恢复模式即可使用新版本。"
 
 [settings]
+always_on = "息屏显示"
+remember_password = "记住解密密码"
 light_mode = "浅色模式"
 dark_mode = "深色模式"
 brightness = "亮度"
@@ -1371,3 +1373,12 @@ none = "暂无可安装的文件"
 no_usb_drive = "未连接 U 盘"
 connect_usb_drive = "通过 OTG 连接 U 盘后，将在此显示其中的文件。"
 usb_drive_format = "请使用 FAT32 或 exFAT 格式的 U 盘。{why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "轻触亮屏"
+
+# The torch the side button lights.
+[torch]
+on = "手电筒已打开"
+off = "手电筒已关闭"

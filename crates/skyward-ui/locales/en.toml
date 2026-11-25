@@ -694,6 +694,8 @@ both_slots = "The new version goes into the recovery partition of the slot that 
 reboot_to_use = "Once updated, reboot to recovery to use the new version."
 
 [settings]
+always_on = "Always-on screen"
+remember_password = "Remember the decryption password"
 light_mode = "Light mode"
 dark_mode = "Dark mode"
 brightness = "Brightness"
@@ -1544,3 +1546,12 @@ none = "Nothing here to install"
 no_usb_drive = "No USB drive"
 connect_usb_drive = "Connect a USB drive through OTG to see its files here."
 usb_drive_format = "Use a USB drive formatted as FAT32 or exFAT. {why}"
+
+# The screen that shows the time while the pages sleep.
+[always_on]
+hint = "Tap to wake"
+
+# The torch the side button lights.
+[torch]
+on = "The torch is on"
+off = "The torch is off"

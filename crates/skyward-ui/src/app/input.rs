@@ -5,11 +5,24 @@ use super::*;
 
 impl App {
     pub fn touch(&mut self, ev: Touch, f: &Fonts, now: u64) -> Vec<Effect> {
-        // A finger on the dark panel lights nothing, as on the phone's own
-        // system, where the power key lights it.
+        // A finger on the dark panel lights it: twice quickly where the
+        // panel is dark, once where the always-on screen shows. Either way
+        // the finger that woke it presses nothing.
         if !self.display_on {
+            if let Touch::Down(x, y) = ev {
+                let near = self.last_tap.is_some_and(|(at, tx, ty)| {
+                    now.saturating_sub(at) <= DOUBLE_TAP_MS && (x - tx).abs() <= DOUBLE_TAP_SLOP && (y - ty).abs() <= DOUBLE_TAP_SLOP
+                });
+                self.last_tap = Some((now, x, y));
+                if self.state.aod || near {
+                    self.wake(now);
+                    self.last_tap = None;
+                    self.drag = Drag::Waking;
+                }
+            }
             return Vec::new();
         }
+        self.last_tap = None;
         // A finger on the charging screen sends it away for the page, and
         // does nothing else until it lifts.
         if self.charge_shown() {
@@ -328,6 +341,12 @@ impl App {
     /// goes down first waits [`CHORD_MS`] for the other, or until it is let
     /// go, and then does what it does alone, as pressed when it went down.
     pub fn key(&mut self, key: Key, now: u64) -> Vec<Effect> {
+        // The side button lights the torch, and does nothing else: it works
+        // the same with the pages awake as with them asleep, as a torch key
+        // on a phone of its own does. Every press ticks the motor.
+        if key == Key::Side {
+            return vec![Effect::Haptic, Effect::Torch];
+        }
         // Any button stops a gliding page, and brings a sliding one to rest.
         self.fling = None;
         self.end_turn();
@@ -398,6 +417,9 @@ impl App {
     /// held is timed from when it went down, the screen goes off from now.
     fn key_down(&mut self, key: Key, at: u64, now: u64) -> Vec<Effect> {
         match key {
+            // The side button never reaches here: it lights the torch before
+            // anything else looks at it.
+            Key::Side => Vec::new(),
             Key::Back => {
                 self.button = Some((key, Press::Spent));
                 self.act(Action::Back, at)
@@ -701,5 +723,61 @@ mod tests {
         app.touch(Touch::Move(40.0, 2100.0), &f, 32);
         app.touch(Touch::Up, &f, 40);
         assert_eq!(app.cue.as_ref().map(|c| c.1), Some(at), "it sinks back where it was");
+    }
+}
+
+#[cfg(test)]
+mod side_button_and_waking_tests {
+    use super::super::testing::*;
+    use super::*;
+
+    #[test]
+    fn the_side_button_lights_the_torch_and_nothing_else() {
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        assert_eq!(app.key(Key::Side, 1000), vec![Effect::Haptic, Effect::Torch], "every press ticks the motor");
+        // It works the same with the pages asleep, and does not light them.
+        app.sleep(2000);
+        assert_eq!(app.key(Key::Side, 3000), vec![Effect::Haptic, Effect::Torch]);
+        assert!(!app.display_on(), "the torch does not light the pages");
+        // The pages say which it is.
+        app.wake(4000);
+        app.torch(true, 4010);
+        assert!(app.state.torch);
+        app.torch(false, 4020);
+        assert!(!app.state.torch);
+    }
+
+    #[test]
+    fn a_double_tap_on_the_dark_panel_lights_it() {
+        let (f, _i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.sleep(0);
+        assert!(!app.display_on(), "the pages sleep");
+        // One tap lights nothing.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 1000);
+        app.touch(Touch::Up, &f, 1010);
+        assert!(!app.display_on(), "one tap is not two");
+        // Two quickly do.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 1200);
+        assert!(app.display_on(), "the second tap lights the panel");
+    }
+
+    #[test]
+    fn the_always_on_screen_shows_while_the_pages_sleep() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.set_aod(true);
+        app.sleep(0);
+        assert!(!app.display_on(), "the pages sleep");
+        assert!(app.panel(10).is_some(), "the panel stays lit, dim");
+        assert_eq!(app.deadline(10), Some(10 + AOD_TICK_MS), "it draws itself again to keep the time right");
+        // What it shows is the time and the battery, on black.
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "23:41", 20);
+        let lit = c.data.chunks_exact(4).filter(|px| px[0] > 0x40).count();
+        assert!(lit > 200, "the time is drawn: {lit} lit pixels");
+        // One tap wakes the pages.
+        app.touch(Touch::Down(600.0, 1600.0), &f, 100);
+        assert!(app.display_on(), "a tap on the always-on screen wakes it");
     }
 }

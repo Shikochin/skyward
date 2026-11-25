@@ -82,7 +82,7 @@ const SCREENSHOTS: &str = "DCIM/Screenshots";
 const HELD_SCREENSHOTS: &str = "/skyward/run/screenshots";
 
 /// The panel backlight under /sys/class/backlight.
-struct Backlight {
+pub(crate) struct Backlight {
     path: PathBuf,
     /// The raw level at the top of the slider: the panel's normal maximum.
     top: u32,
@@ -91,7 +91,7 @@ struct Backlight {
 }
 
 impl Backlight {
-    fn open() -> Result<Self> {
+    pub(crate) fn open() -> Result<Self> {
         let mut dirs: Vec<PathBuf> = fs::read_dir("/sys/class/backlight")
             .context("read /sys/class/backlight")?
             .map(|e| e.map(|e| e.path()))
@@ -118,7 +118,7 @@ impl Backlight {
 
     /// Light the panel at `level` of its normal maximum, or turn it off
     /// with `None`. The file is written only when the raw level changes.
-    fn show(&mut self, level: Option<f32>) -> Result<()> {
+    pub(crate) fn show(&mut self, level: Option<f32>) -> Result<()> {
         let raw = level.map_or(0, |v| ((v.clamp(0.0, 1.0) * self.top as f32).round() as u32).max(1));
         if raw != self.level {
             fs::write(&self.path, raw.to_string()).with_context(|| format!("write {}", self.path.display()))?;
@@ -1112,6 +1112,7 @@ fn job_end(end: filework::End) -> JobEnd {
 pub fn run(cfg: &DeviceConfig, programs: &[Service], font: &Path, mono: &Path, request: bcb::Request, start: Screen, dump: Option<&Path>) -> Result<()> {
     let mut pages = Pages::open(cfg, programs, font, mono, request, start, dump)?;
     pages.begin()?;
+    pages.open_data_at_once()?;
     // The phone sleeps while its screen is off and nothing needs it awake.
     let sleeper = Sleeper::start()?;
     // A uevent may be a charger or a computer attached or taken away: the
@@ -1205,6 +1206,11 @@ struct Pages<'a> {
     /// and the users whose own files are still closed once it is open.
     decryptor: Option<Decryptor>,
     closed: Vec<Closed>,
+    /// The credential typed for an unlock, to be kept once it opens the
+    /// user's files where the settings ask for it.
+    typed: Option<(u32, Vec<u8>)>,
+    /// The user whose kept credential is being tried, where one is.
+    tried: Option<u32>,
     /// Work on whole partitions under way.
     part_worker: Option<partwork::Worker>,
     /// Copying, moving or deleting under way.
@@ -1296,6 +1302,7 @@ impl<'a> Pages<'a> {
         };
         let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
         app.set_screen_corners(cfg.display.corner_radius as f32);
+        app.set_aod(cfg.device.aod);
         // The settings kept from the starts before are back before the first
         // frame, and before file transfer starts with its switch and the time
         // zone. The pages speak the language chosen then, or else the one the
@@ -1435,6 +1442,8 @@ impl<'a> Pages<'a> {
             rescue_erasing: false,
             decryptor: None,
             closed: Vec::new(),
+            typed: None,
+            tried: None,
             part_worker: None,
             worker: None,
             relabeler: None,
@@ -1455,6 +1464,18 @@ impl<'a> Pages<'a> {
             seen: None,
             drive_at: Instant::now(),
         })
+    }
+
+    /// Open the data partition as the pages come up, where the phone's own
+    /// system says it is encrypted: a phone whose credential is kept opens
+    /// without the page that would ask for one ever showing.
+    fn open_data_at_once(&mut self) -> Result<()> {
+        if self.fastboot || skyward_sys::prop("ro.crypto.state").as_deref() != Some("encrypted") {
+            return Ok(());
+        }
+        self.app.data_opening();
+        self.decryptor = Some(Decryptor::start(decrypt::Job::Open)?);
+        Ok(())
     }
 
     /// Start the work the request in misc asks for, take up what an earlier
@@ -2355,6 +2376,36 @@ impl Pages<'_> {
         Ok(())
     }
 
+    /// Try the credential kept for a user whose files are closed, where the
+    /// settings ask for it, and say whether one is being tried.
+    fn kept_credential(&mut self) -> Result<bool> {
+        if !self.app.state.remember || self.closed.is_empty() {
+            return Ok(false);
+        }
+        for c in self.closed.iter().filter(|c| !c.made_up) {
+            match crate::remember::load(c.user) {
+                Ok(Some(credential)) => {
+                    let job = decrypt::Job::Unlock { closed: self.closed.clone(), user: c.user, credential };
+                    match Decryptor::start(job) {
+                        Ok(started) => {
+                            self.decryptor = Some(started);
+                            self.tried = Some(c.user);
+                            skyward_sys::kmsg(&format!("the kept screen lock is tried on user {}", c.user))?;
+                            return Ok(true);
+                        }
+                        Err(e) => {
+                            skyward_sys::kmsg(&format!("the kept screen lock is not tried: {e:#}"))?;
+                            return Ok(false);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => skyward_sys::kmsg(&format!("the kept screen lock is not read: {e:#}"))?,
+            }
+        }
+        Ok(false)
+    }
+
     /// How opening the data partition, or a user's own files in it, ended.
     fn decrypt_told(&mut self, now: u64) -> Result<()> {
         let Some(ended) = self.decryptor.as_ref().and_then(Decryptor::ended) else { return Ok(()) };
@@ -2365,7 +2416,13 @@ impl Pages<'_> {
                     log_mounted(mounted)?;
                 }
                 self.closed = opening.closed;
-                show_closed(&mut self.app, &self.closed)?;
+                // A credential the user asked the recovery to keep opens the
+                // user it was typed for before the page that would ask for
+                // one shows: the pages keep saying the partition is being
+                // opened until it is.
+                if !self.kept_credential()? {
+                    show_closed(&mut self.app, &self.closed)?;
+                }
                 follow_system_zone(&mut self.app, kept_time_zone()?.as_deref(), &self.info)?;
             }
             decrypt::Ended::Opened(Err(why)) => {
@@ -2382,9 +2439,30 @@ impl Pages<'_> {
             decrypt::Ended::Unlocked(Ok(still)) => {
                 self.closed = still;
                 show_closed(&mut self.app, &self.closed)?;
+                if let Some(user) = self.tried.take() {
+                    skyward_sys::kmsg(&format!("the kept screen lock opened user {user}"))?;
+                }
+                if self.app.state.remember
+                    && let Some((user, credential)) = self.typed.take()
+                {
+                    match crate::remember::save(user, &credential) {
+                        Ok(()) => skyward_sys::kmsg(&format!("the screen lock of user {user} is kept for the next start"))?,
+                        Err(e) => skyward_sys::kmsg(&format!("the screen lock is not kept: {e:#}"))?,
+                    }
+                }
             }
             decrypt::Ended::Unlocked(Err(why)) => {
                 skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
+                if let Some(user) = self.tried.take() {
+                    // A kept credential the user has changed since is of no
+                    // use, and is forgotten rather than tried again at every
+                    // start.
+                    let said = match crate::remember::forget() {
+                        Ok(()) => "the kept screen lock is forgotten".to_string(),
+                        Err(e) => format!("the kept screen lock is not forgotten: {e:#}"),
+                    };
+                    skyward_sys::kmsg(&format!("the kept screen lock did not open user {user}, and {said}"))?;
+                }
                 self.app.unlock_failed(why, now);
             }
         }
@@ -2591,9 +2669,26 @@ impl Pages<'_> {
             }
             Effect::Unlock { user, code } => {
                 ensure!(self.decryptor.is_none(), "the data partition is being opened already");
-                let job = decrypt::Job::Unlock { closed: self.closed.clone(), user, credential: code.into_bytes() };
+                let credential = code.into_bytes();
+                self.typed = Some((user, credential.clone()));
+                let job = decrypt::Job::Unlock { closed: self.closed.clone(), user, credential };
                 self.decryptor = Some(Decryptor::start(job)?);
             }
+            // Turning the switch off forgets what was kept.
+            Effect::Remember(false) => match crate::remember::forget() {
+                Ok(()) => skyward_sys::kmsg("the kept screen lock is forgotten")?,
+                Err(e) => skyward_sys::kmsg(&format!("the kept screen lock is not forgotten: {e:#}"))?,
+            },
+            Effect::Remember(true) => {}
+            // The side button lights the torch, or puts it out.
+            Effect::Torch => match crate::torch::toggle() {
+                Ok(on) => self.app.torch(on, now),
+                Err(e) => {
+                    let why = format!("{e:#}");
+                    skyward_sys::kmsg(&format!("the torch is not lit: {why}"))?;
+                    self.app.report(&why, now);
+                }
+            },
             Effect::ReadDir(folder) => list(&mut self.app, folder)?,
             Effect::ReadPlace(place, folder) => list_place(&mut self.app, place, folder)?,
             Effect::Paste { op, path, into, clash } => self.paste(op, path, into, clash, now)?,
