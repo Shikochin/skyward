@@ -784,6 +784,11 @@ fn recovery() -> Result<()> {
             skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
         }
         skyward_sys::set_prop("sys.usb.config", "adb")?;
+        // init starts the recovery service before its own ueventd has made
+        // every node: the boot control's is waited for, as the phone's own
+        // recovery is started only once it is there.
+        skyward_sys::wait_file(Path::new("/dev/block/by-name/misc"), std::time::Duration::from_secs(10))
+            .context("wait for the boot control's node")?;
         let misc = bcb::misc();
         let message = bcb::read(&misc)?;
         let request = message.request();
@@ -791,6 +796,15 @@ fn recovery() -> Result<()> {
             bcb::clear(&misc)?;
         }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        // The phone's own recovery image runs permissive, and the programs of
+        // its own that a recovery starts were made for that: where the
+        // configuration says so, the rule is written as the stock one has it.
+        if cfg.device.permissive {
+            match std::fs::write("/sys/fs/selinux/enforce", "0") {
+                Ok(()) => skyward_sys::kmsg("the recovery runs permissive, as its configuration asks")?,
+                Err(e) => skyward_sys::kmsg(&format!("the recovery runs as SELinux has it: {e}"))?,
+            }
+        }
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
