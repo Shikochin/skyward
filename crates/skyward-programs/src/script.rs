@@ -156,6 +156,12 @@ fn lines(text: &str) -> Result<Vec<(usize, Vec<String>)>> {
             '#' if word.is_none() => {
                 while chars.next_if(|&c| c != '\n').is_some() {}
             }
+            // Some of the phone's own scripts write their comments with two
+            // slashes rather than a hash.
+            '/' if word.is_none() && chars.peek() == Some(&'/') => {
+                chars.next();
+                while chars.next_if(|&c| c != '\n').is_some() {}
+            }
             '"' => {
                 let quoted = word.get_or_insert_with(String::new);
                 loop {
@@ -317,6 +323,16 @@ mod tests {
         let script = read("service vendor.qseecomd /vendor/bin/qseecomd\n").unwrap();
         assert_eq!(script.programs[0].classes, ["default"]);
         assert_eq!((script.programs[0].user.as_ref(), script.programs[0].groups.len()), (None, 0));
+    }
+
+    #[test]
+    fn comments_may_be_written_with_slashes() {
+        // The phone's own scripts open with a line of slashes, as OPLUS's
+        // contexthub script does.
+        let script = read("//move from vendor/\nservice hub /vendor/bin/hw/hub --flag\n    class hal\n").unwrap();
+        assert_eq!(script.programs.len(), 1);
+        assert_eq!(script.programs[0].path, "/vendor/bin/hw/hub");
+        assert_eq!(script.programs[0].args, vec!["--flag"]);
     }
 
     #[test]
