@@ -1581,3 +1581,134 @@ SHA-256   d4bcf3fce8e816b6b0a4b2b9eb8168d099a7fa1b0a4dab9203875be9fe606e89
 /tmp/fairlady/skyward-fairlady-vbmeta.img   104,857,600 字节
 SHA-256   5cb321f38954ddbc7e4b01d81eaabba7bd48555a117f560278ca0cea5fb3b92f
 ```
+
+---
+
+## 31. 跟上上游 0.5.1：解密链交给上游，功能搬进新的页面模块
+
+上游从 v0.3.0 到 v0.5.1 做了两件影响这次移植的大事：
+
+1. **解密链内置了**：`keys.rs` 按手机**自己的分区**（init 脚本、VINTF 清单）推出该起哪些密钥程序，
+   `skyward-omapi` 自己充当 `android.se.omapi.ISecureElementService`，weaver 的 eSE 驱动
+   （`nxp-nci` → `/dev/nq-nci`）也自己加载。§26 里手写的那一长串 `[[service]]`
+   和从 OFox 拿来的 `se_omapi` / weaver overlay **全部可以删掉**。
+2. **UI 重构了**：`app.rs` 拆成 `app/` 下每个页面一个模块，文案改成 `locales/*.toml`（15 种语言）生成。
+
+### 31.1 合并步骤
+
+```sh
+rustup toolchain install 1.100.0 --component clippy --target aarch64-linux-android   # crate 钉在 1.100
+git remote add upstream https://github.com/kirklin/skyward.git
+git fetch upstream --tags
+git checkout -b merge/upstream-0.5.1
+git merge upstream/main
+```
+
+冲突只有 6 个：`app.rs`（上游删除、拆成 `app/`）、`pages.rs`、`main.rs`、`secure.rs`、`services.rs`、`ui.rs`。
+除 `app.rs` 用上游的删除外，其余先取上游版本，再把本 fork 的东西重做上去。
+
+`skyward_config::Service` 里本 fork 加的 `sockets` / `env` 保留，并在
+`skyward-programs/src/secure.rs` 的 `From<Service> for Started` 里映射成上游的
+`script::Socket` / `environment`——触摸服务的两个 dgram socket 靠它。
+
+### 31.2 这台机器必须补的四点（上游不知道的）
+
+| 现象 | 原因 | 修法 |
+| --- | --- | --- |
+| **进 recovery 黑屏**，日志 `recovery failed: panel … gives its normal maximum as none of [("mi,normal-max-brightness-clone", …)]` | `ui.rs::normal_max` 只从小米面板的设备树字段取"正常最大亮度"，OPLUS 面板一个都没有 | 取不到时退回 `max_brightness`（本机 4094），并写 klog |
+| `devices not brought up: … /vendor/etc/init/android.hardware.contexthub-service.qmi.rc: line 1: //move begins no section` | 上游的 init 脚本解析只认 `#` 注释，OPLUS 用 `//` | `script.rs` 把行首 `//` 也当注释 |
+| `… weaver-service.nxp is a weaver of a make the recovery does not know` | 上游只认 `.thales` / `.nxp-qti` / `weaver-service` 三种命名 | `WEAVERS` 加 `(".nxp", Through::ElementService, Some(NXP_CONTROLLER))` |
+| 数据分区一直不开 | 之前的"启动即解密"用 `ro.crypto.state` 判断是否加密，而 **recovery 里这个属性是空的** | 非 fastboot 一律先开；未加密的手机上游能无密钥打开 |
+
+另外两处顺带修好：`[device] permissive` 在合并时丢了写 `/sys/fs/selinux/enforce` 的代码（已补回）；
+init 有时比 ueventd 早启服务，第一次启动因 `/dev/block/by-name/misc` 不存在而失败重启（现在等这个节点，
+开机快约 5 秒）。
+
+### 31.3 精简后的配置（1501 字节）
+
+只留 **触摸服务**（OPLUS 用户态算法栈，带两个 dgram socket），其余全部交给上游：
+
+```toml
+[device]
+codename = "fairlady"
+os_version_prop = "ro.build.display.id"
+permissive = true
+freeze = ["phoenix_recovery"]
+mtp = true
+aod = true
+
+[display]
+width = 1216
+height = 2640
+density = 480
+diagonal = 6.32
+corner_radius = 160
+
+[modules]
+sources = ["vendor_dlkm", "vendor"]
+load = ["oplus_bsp_tp_tcm_S3910", "oplus_bsp_tp_hbp_syna_s3910"]
+
+[firmware]
+partition = "modem"
+
+[partitions]
+mounted = ["persist"]
+
+[[service]]
+path = "/skyward/touch/bin/vendor-oplus-hardware-touch-V2-hbp5-service"
+libraries = ["/skyward/touch/lib64", "/system/lib64"]
+ready_service = "vendor.oplus.hardware.touch.IOplusTouch/default"
+sockets = [ … hidl2touchdaemon_client / hidl2touchdaemon_server … ]
+```
+
+### 31.4 本 fork 的功能怎么搬过来的
+
+| 功能 | 现在在哪 |
+| --- | --- |
+| 息屏显示（20%） | `app/power.rs`（`panel`/`sleep`）、`app/draw.rs::compose_aod`、`app/mod.rs`（`AOD_LEVEL`、`deadline`） |
+| 双击亮屏 / 轻触亮屏 | `app/input.rs::touch`（`last_tap`、`DOUBLE_TAP_MS`、`DOUBLE_TAP_SLOP`） |
+| 记住解密密码 | `skyward-crypto/src/keep.rs`（scrypt + AES-256-GCM）、`skyward/src/remember.rs`、`ui.rs::kept_credential` |
+| 启动即解密 | `ui.rs::open_data_at_once`、`app/decrypt.rs::data_opening` |
+| 侧边键手电筒 | `skyward/src/{input.rs,torch.rs}`、`app/input.rs::key`（`Key::Side` → `Haptic`+`Torch`） |
+| 开机动画 | `skyward-ui/src/boot.rs` + `skyward/src/boot.rs`，在 `main.rs::recovery` 里包住 `prepare` |
+| 文案 | `crates/skyward-ui/locales/*.toml` 15 种语言（`settings.always_on`、`settings.remember_password`、`always_on.hint`、`torch.on/off`） |
+
+**预测性返回没有搬**（上游重构后成本太高，按需要放弃）。
+
+### 31.5 原厂 recovery 与 vbmeta 的重建流程
+
+`/tmp` 被系统清掉后，两样东西可以这样找回来：
+
+```sh
+# 1. 原厂 recovery：从"另一个槽"dump（本机 current slot 是 a，所以取 recovery_b）
+adb root
+adb shell 'dd if=/dev/block/by-name/recovery_b of=/data/local/tmp/stock.img bs=1M'
+adb pull /data/local/tmp/stock.img ~/Downloads/fairlady/recovery.img
+
+# 2. 旧镜像里的设备配置与 overlay
+skyward-pack cat release.img skyward/device.toml > fairlady.toml
+skyward-pack list release.img | grep ' skyward/'        # 逐个 cat 出来即可
+
+# 3. 打包后把手机认的那份签名 vbmeta 放回去（打包器自己写的是 512 字节未签名版）
+#    footer 布局：magic(4) ver(8) original_image_size(8) vbmeta_offset(8) vbmeta_size(8) reserved(28)
+python3 - <<'PY'
+import struct
+info = lambda b: struct.unpack(">QQQ", b[12:36])
+new = bytearray(open("packed.img","rb").read())
+off = info(bytes(new[-64:]))[1]
+official = open("old-working.img","rb").read()[75911168:75911168+2240]   # 旧镜像里的官方 vbmeta
+new[off:off+2240] = official
+b = bytes(new[-64:])
+new[-64:] = b[:28] + struct.pack(">Q", 2240) + b[36:]
+open("skyward-fairlady-0.5.1.img","wb").write(bytes(new))
+PY
+```
+
+镜像（0.5.1）：
+
+```
+skyward-fairlady-0.5.1.img   104,857,600 字节
+SHA-256   32304e0007f0922966786023b1a24dfe27a6d38e37182f82d47894262d690892
+```
+
+实测：开机动画正常、`/data` 约 10 秒打开、保存的解密密码自动解锁、permissive 生效、MTP 与触摸正常。
